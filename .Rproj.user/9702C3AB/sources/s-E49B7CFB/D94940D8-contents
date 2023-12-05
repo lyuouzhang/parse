@@ -1,0 +1,2110 @@
+setwd("C:/Dropbox/PARSE/paper files/simulation/parse-R-version0.1.1/PARSE")
+
+library(devtools)
+
+document()
+
+build()
+
+
+setwd("C:/Dropbox/PARSE/paper files/simulation")
+
+install.packages("parse-R-version0.1.1/PARSE_0.1.1.tar.gz", repos=NULL, type="source")
+
+rm(list=ls())
+
+library(gplots)
+library(mvtnorm)
+library(xtable)
+library(fpc)
+library(Matrix)
+library(sparcl)
+library(e1071)
+
+library(snow)
+library(rlecuyer) # loads the random number generator needed for multi-core
+library(doParallel) # replace parallel from snow
+library(foreach)
+
+library(PARSE)
+
+### difference between means
+mu.diff.create = function(K){
+  A = c()
+  for(k in 1:K){
+    A = rbind(A, cbind(matrix(0,K-k,k-1),rep(1,K-k),-diag(K-k)))
+  }
+  return(A)
+}
+
+### mis-clustering function, kendall's tau
+miss.clus = function(a, true.label){
+  pair.label.true = outer(true.label, true.label, '==')
+  pair.label.est = outer(a, a, '==')
+  return(sum(abs(pair.label.est[upper.tri(pair.label.est)] - pair.label.true[upper.tri(pair.label.true)]))/sum(upper.tri(pair.label.true)))
+}
+
+### mis-clustering function, hamming's distance
+miss.clus=function(clus,true_clus){
+  m=max(c(clus,true_clus))
+  Ptmp=permutations(m)
+  etmp=rep(0,factorial(m))
+  for(i in 1:factorial(m)){
+    etmp[i]=mean((as.numeric(factor(clus,level=Ptmp[i,]))-true_clus!=0))
+  }
+  return(min(etmp))
+}
+
+### mis-clustering function, hamming's distance, with mse
+miss.clus.a=function(clus,true_clus,mu.hat,mu){
+  m=max(c(clus,true_clus))
+  Ptmp=permutations(m)
+  etmp=rep(0,factorial(m))
+  for(i in 1:factorial(m)){
+    etmp[i]=mean((as.numeric(factor(clus,level=Ptmp[i,]))-true_clus!=0))
+  }
+  j=which.min(etmp)
+  mis=etmp[j]
+  mse=sqrt(sum((mu.hat[Ptmp[j,],]-mu)^2)/m)
+  return(c(mis=mis,mse=mse))
+}
+
+
+##############
+# Model generation with different snr, n, p, and model
+##############
+
+model_generate = function(n,p,snr,model,s=20){
+  #K=4
+
+  mu.all = matrix(0,p,4)
+
+    s=s/2
+    mu.all[1:s,1] = 2.5
+    mu.all[1:s,4] = -2.5
+    mu.all[(s+1):(2*s),1] = 1.5
+    mu.all[(s+1):(2*s),2] = 1.5
+    mu.all[(s+1):(2*s),3] = -1.5
+    mu.all[(s+1):(2*s),4] = -1.5
+
+
+
+  mu.all = mu.all*snr
+  Sigma = diag(4,p)
+
+  if(model!=3){
+    if(model!=4||model!=6){
+      if(model==1){
+        #independent normal
+        Sigma = diag(4,p)
+      }else if(model==2){
+        #normal with sparse off-diagonal
+        Sigma = diag(4,p)
+        for(i in 1:5){
+          Sigma[i,i+1] = 0.8
+          Sigma[i+1,i] = 0.8
+        }
+        for(i in 6:10){
+          Sigma[i,i+1] = -2
+          Sigma[i+1,i] = -2
+        }
+      }else if(model==5){
+        #banding normal
+        Sigma = as.matrix(diag(3,p)+band(matrix(1,p,p),-2,2))
+      }
+      y = rbind(rmvnorm(n,mu.all[,1],Sigma),
+                rmvnorm(n,mu.all[,2],Sigma),
+                rmvnorm(n,mu.all[,3],Sigma),
+                rmvnorm(n,mu.all[,4],Sigma))
+    }else if(model==4){
+      #indepedent normal and t
+      Sigma = diag(4,p/2)
+      y = matrix(0,n*4,p)
+      y[,seq(1,p,2)] = rbind(rmvnorm(n,mu.all[seq(1,p,2),1],Sigma),
+                             rmvnorm(n,mu.all[seq(1,p,2),2],Sigma),
+                             rmvnorm(n,mu.all[seq(1,p,2),3],Sigma),
+                             rmvnorm(n,mu.all[seq(1,p,2),4],Sigma))
+      y[,seq(2,p,2)] = t(cbind(matrix(rt(n*p/2,3)/sqrt(3)*2,p/2,n)+mu.all[seq(2,p,2),1],
+                               matrix(rt(n*p/2,3)/sqrt(3)*2,p/2,n)+mu.all[seq(2,p,2),2],
+                               matrix(rt(n*p/2,3)/sqrt(3)*2,p/2,n)+mu.all[seq(2,p,2),3],
+                               matrix(rt(n*p/2,3)/sqrt(3)*2,p/2,n)+mu.all[seq(2,p,2),4]))
+    }else if(model==6){
+      #indepedent normal and t_8
+      Sigma = diag(4,p/2)
+      y = matrix(0,n*4,p)
+      y[,seq(1,p,2)] = rbind(rmvnorm(n,mu.all[seq(1,p,2),1],Sigma),
+                             rmvnorm(n,mu.all[seq(1,p,2),2],Sigma),
+                             rmvnorm(n,mu.all[seq(1,p,2),3],Sigma),
+                             rmvnorm(n,mu.all[seq(1,p,2),4],Sigma))
+      y[,seq(2,p,2)] = t(cbind(matrix(rt(n*p/2,8)/sqrt(8)*2,p/2,n)+mu.all[seq(2,p,2),1],
+                               matrix(rt(n*p/2,8)/sqrt(8)*2,p/2,n)+mu.all[seq(2,p,2),2],
+                               matrix(rt(n*p/2,8)/sqrt(8)*2,p/2,n)+mu.all[seq(2,p,2),3],
+                               matrix(rt(n*p/2,8)/sqrt(8)*2,p/2,n)+mu.all[seq(2,p,2),4]))
+    }
+  }else if(model==3){
+    #indepedent normal and uniform
+    Sigma = diag(4,p/2)
+
+    mu.all = matrix(0,p/2,4)
+
+    mu.all[1:10,1] = 2.5
+    mu.all[1:10,4] = -2.5
+
+    mu.all = mu.all*snr
+
+    low.unif = rep(-2*sqrt(3),p/2)
+    upp.unif = rep(2*sqrt(3),p/2)
+
+    low.unif[1:10] = snr/2-2*sqrt(3)
+    upp.unif[1:10] = snr/2+2*sqrt(3)
+
+    y = rbind(rmvnorm(n,mu.all[,1],Sigma),
+              rmvnorm(n,mu.all[,2],Sigma),
+              rmvnorm(n,mu.all[,3],Sigma),
+              rmvnorm(n,mu.all[,4],Sigma))
+
+    for(i in 1:(p/2)){
+      y = cbind(y, runif(n,low.unif[i],upp.unif[i]))
+    }
+
+    y.tmp = y[,11:20]
+    y[,11:20] = y[,(p/2+1):(p/2+10)]
+    y[,(p/2+1):(p/2+10)] = y.tmp
+  }
+
+  return(y)
+
+}
+
+########################
+
+model_generate_a = function(n,p,snr,model,s=30,K=4){
+  #K=2^s
+
+  mu.all.0 = matrix(0.2,p,K)
+
+  for(k in 1:(K/2)){
+    mu.all.0[((k-1)*s+1):(k*s),((k-1)*2+1):(k*2)] = matrix(c(1,0.5),s,2,byrow = T)
+  }
+
+  pos = matrix(0,n*4,K)
+
+  for(i in 1:(n*4)){
+    pos[i,(i-1)%%K+1] = 1
+  }
+
+  mu.all = mu.all.0*snr
+
+  Sigma = diag(1,p)
+
+  y = matrix(0,n*4,p)
+
+  z = rep(0,n)
+
+  if(model==1){
+    #independent normal
+    Sigma = diag(1,p)
+
+    for(i in 1:K){
+      pos.tmp = which(pos[,i]==1)
+      y[pos.tmp,] = rmvnorm(length(pos.tmp),mu.all[,i],Sigma)
+      z[pos.tmp] = i
+    }
+
+  }else if(model==5){
+    #banding normal
+    Sigma = as.matrix(diag(3,p)+band(matrix(1,p,p),-2,2))
+
+    for(i in 1:K){
+      pos.tmp = which(pos[,i]==1)
+      y[pos.tmp,] = rmvnorm(length(pos.tmp),mu.all[,i],Sigma)
+      z[pos.tmp] = i
+    }
+  }else if(model==7){
+    #banding across non-informative
+    Sigma = as.matrix(diag(0.5,p)+
+            cbind(rbind(diag(0.5,s*K),matrix(0,p-s*K,s*K)),
+                  rbind(matrix(0,s*K,p-s*K),band(matrix(0.5,p-s*K,p-s*K),-2,2))))
+
+    for(i in 1:K){
+      pos.tmp = which(pos[,i]==1)
+      y[pos.tmp,] = rmvnorm(length(pos.tmp),mu.all[,i],Sigma)
+      z[pos.tmp] = i
+    }
+  }else if(model==6){
+    #indepedent normal and t_8
+
+    Sigma = diag(1,p/2)
+
+    for(i in 1:K){
+      pos.tmp = which(pos[,i]==1)
+      y[pos.tmp,seq(1,p,2)] = rmvnorm(length(pos.tmp),mu.all[seq(1,p,2),i],Sigma)
+      y[pos.tmp,seq(2,p,2)] = t(matrix(rt(length(pos.tmp)*p/2,8)/sqrt(8),p/2,length(pos.tmp))+mu.all[seq(2,p,2),i])
+      z[pos.tmp] = i
+    }
+
+  }
+
+
+  return(list(y=y,z=z,mu.all=mu.all))
+
+}
+
+
+##############
+# Fit model with PARSE and two-stage
+##############
+
+model_fit = function(r,n,p,snr,model,sparsity=20){
+
+  #Khat, info, non-info, mis-clustering
+
+
+  clust_diff = matrix(c(1,1,1,2,2,3,2,3,4,3,4,4),6,2)
+  mu_diff = matrix(c(1,1,1,0,0,0,-1,0,0,1,1,0,0,-1,0,-1,0,1,0,0,-1,0,-1,-1),6,4)
+
+  #restrict seed
+
+  set.seed(r+1000)
+
+  y = model_generate(n,p,snr,model,sparsity)
+
+  #balanced design
+  true.label = rep(1:4,each=n)
+
+  #prediction strength
+  ps = prediction.strength(y, Gmin = 3, Gmax = 5)
+
+  Khat_two = min(max(ps$optimalk,3),5)
+  #Khat_two = 4
+
+  #K-means
+
+  z_two = kmeans(y, centers = Khat_two)$cluster
+
+  mis.two = miss.clus(z_two,true.label)
+
+  km_two = kmeans(y, centers = 4)
+
+  z_two = km_two$cluster
+
+  mu_two = km_two$centers
+
+  z_two_o = as.numeric(factor(z_two,levels = unique(z_two)))
+
+  p.value = matrix(0,p,6)
+
+  for(i in 1:p){
+    for(j in 1:6){
+      z_two_1 = c(which(z_two_o==clust_diff[j,1]),which(z_two_o==clust_diff[j,2]))
+      anova.fit.tmp1 = aov(y[z_two_1,i]~factor(z_two_o[z_two_1]))
+      p.value[i,j] = min(base::summary(anova.fit.tmp1)[[1]][1,5],1)
+    }
+  }
+
+  #sparse K-means
+
+  skm_sparse = KMeansSparseCluster(y, K = 4 ,wbounds = 1.1)[[1]]
+
+  z_sparse = skm_sparse$Cs
+
+  pos_sparse = sapply(1:4,function(x){z_sparse==x})
+
+  mu_sparse = (t(pos_sparse)/apply(pos_sparse,2,sum))%*%y
+
+  mis.sparse = miss.clus(z_sparse,true.label)
+
+  #z_sparse = KMeansSparseCluster(y, K = 4 ,wbounds = 1.1)[[1]]$Cs
+
+  z_sparse_o = as.numeric(factor(z_sparse,levels = unique(z_sparse)))
+
+  p.value.s = matrix(0,p,6)
+
+  for(i in 1:p){
+    for(j in 1:6){
+      z_sparse_1 = c(which(z_sparse_o==clust_diff[j,1]),which(z_sparse_o==clust_diff[j,2]))
+      anova.fit.tmp1 = aov(y[z_sparse_1,i]~factor(z_sparse_o[z_sparse_1]))
+      p.value.s[i,j] = min(base::summary(anova.fit.tmp1)[[1]][1,5],1)
+    }
+  }
+
+
+  #parse
+
+  parse.fit = parse(K = 3:5, lambda = 1:3, y = y, kms.nstart = 10, cores = 8)
+
+  K.parse = parse.fit$K.best
+
+  lambda.parse = parse.fit$lambda.best
+
+  z.parse = parse.fit$s.hat.best
+
+  mis.parse = miss.clus(z.parse,true.label)
+
+  parse.fit = parse(K = 4, lambda = lambda.parse, y = y, kms.nstart = 10, cores = 8)
+
+  mu.hat = parse.fit$mu.hat.best
+
+  mu.hat.diff = mu_diff%*%mu.hat
+
+
+  #APFP
+
+  apfp.fit = apfp(K = 3:5, lambda = 1:3, y = y, kms.nstart = 10)
+
+  K.apfp = apfp.fit$K.best
+
+  lambda.apft = apfp.fit$lambda.best
+
+  z.apfp = apfp.fit$s.hat.best
+
+  mis.apfp = miss.clus(z.apfp,true.label)
+
+  apfp.fit = apfp(K = 4, lambda = lambda.apft, y = y, kms.nstart = 10)
+
+  mu.hat.apfp = apfp.fit$mu.hat.best
+
+  mu.hat.apfp.diff = mu_diff%*%mu.hat.apfp
+
+  return(list(clust = c(K.parse, mis.parse, K.apfp, mis.apfp, Khat_two, mis.two, Khat_two, mis.sparse),
+         parse = mu.hat.diff, apfp = mu.hat.apfp.diff, two = t(p.value), sparse = t(p.value.s),
+         mu.two = mu.two, mu_sparse = mu_sparse))
+}
+
+
+model_fit_a = function(r,n,p,snr,model,sparsity=20,K=4){
+
+  #restrict seed
+
+  set.seed(r+1000)
+
+  model_g = model_generate_a(n,p,snr,model,sparsity,K)
+
+  y = model_g$y
+
+  #mu = model_g$mu.all
+
+  #assignments
+  #true.label = model_g$z
+
+  #K-means
+
+  km_two = kmeans(y, centers = K)
+
+  z_two = km_two$cluster
+
+  mu_two = km_two$centers
+
+  #mis.two = miss.clus(z_two,true.label)
+
+  #diff.two = sqrt(sum((t(mu_two)-mu)^2))
+
+  #sparse K-means
+
+  skm_sparse = KMeansSparseCluster(y, K = K ,wbounds = 1.1)[[1]]
+
+  z_sparse = skm_sparse$Cs
+
+  pos_sparse = sapply(1:K,function(x){z_sparse==x})
+
+  mu_sparse = (t(pos_sparse)/apply(pos_sparse,2,sum))%*%y
+
+  #mis.sparse = miss.clus(z_sparse,true.label)
+
+  #diff.sparse = sqrt(sum((t(mu_sparse)-mu)^2))
+
+  #parse
+
+  parse.fit = parse(K = K, lambda = 3, y = y, kms.nstart = 20, cores = 8)
+
+  z.parse = parse.fit$s.hat.best
+
+  #mis.parse = miss.clus(z.parse,true.label)
+
+  mu.hat = parse.fit$mu.hat.best
+
+  #diff.parse = sqrt(sum((t(mu.hat)-mu)^2))
+
+  #APFP
+
+  apfp.fit = apfp(K = K, lambda = 3, y = y, kms.nstart = 10)
+
+  z.apfp = apfp.fit$s.hat.best
+
+  #mis.apfp = miss.clus(z.apfp,true.label)
+
+  mu.hat.apfp = apfp.fit$mu.hat.best
+
+  #diff.apfp = sqrt(sum((t(mu.hat.apfp)-mu)^2))
+
+  return(list(z.parse = z.parse, z.apfp = z.apfp, z.two = z_two, z.sparse = z_sparse,
+              mu.parse = mu.hat, mu.apfp = mu.hat.apfp, mu.two = mu_two, mu.sparse = mu_sparse))
+}
+
+
+model_fit_alt = function(r,n,p,snr,model,sparsity=20){
+
+  #Khat, info, non-info, mis-clustering
+
+  clust_diff = matrix(c(1,1,1,2,2,3,2,3,4,3,4,4),6,2)
+  mu_diff = matrix(c(1,1,1,0,0,0,-1,0,0,1,1,0,0,-1,0,-1,0,1,0,0,-1,0,-1,-1),6,4)
+
+  #restrict seed
+
+  set.seed(r+1000)
+
+  y = model_generate(n,p,snr,model,sparsity)
+
+  #balanced design
+  true.label = rep(1:4,each=n)
+
+  #parse
+
+  parse.fit = parse(K = 4, lambda = 3, y = y, kms.nstart = 10, cores = 8)
+
+  z.parse = parse.fit$s.hat.best
+
+  mis.parse = miss.clus(z.parse,true.label)
+
+  mu.hat = parse.fit$mu.hat.best
+
+  mu.hat.diff = mu_diff%*%mu.hat
+
+  return(list(clust = z.parse, parse = mu.hat.diff))
+}
+
+
+##############
+# 100 replicates
+##############
+
+simulation_parse = function(n,p,snr,model,s=20){
+
+  nrep = 10
+
+  filename=paste0('model',model,'-n',n,'-p',p,'-snr',snr,'-s',s,'-alt-new')
+
+  errors = c()
+
+  for(k in 1:nrep){
+    # Set up a scratch directory for your intermediate files
+    intermediate_directory <- paste0(filename,'-inter')
+    if(!dir.exists(intermediate_directory)){
+      dir.create(intermediate_directory)
+    }
+
+    filename_iter = paste0(filename,as.character(k),'.rda')
+    filepath_iter = file.path(intermediate_directory,filename_iter)
+
+    # If the file exists, skip to the next iteration
+    if (file.exists(filepath_iter)) {
+      load(filepath_iter)
+      errors = c(errors, errors_iter)
+    }else{
+      # Otherwise, run the code
+      errors_iter = model_fit_alt(k,n,p,snr,model,s)
+
+      # Save the result individually
+      save(errors_iter, file = filepath_iter)
+
+      # pass the result to combination of all results
+      errors = c(errors, errors_iter)
+    }
+
+  }
+
+  save(errors,file=paste0(filename,'.RData'))
+
+}
+
+
+#####################################
+
+
+simulation_parse_a = function(n,p,snr,model,s=20,K=4){
+
+  nrep = 10
+
+  filename=paste0('model',model,'-n',n,'-p',p,'-snr',snr,'-s',s,'-K',K,'-set2')
+
+  errors = c()
+
+  for(k in 1:nrep){
+    # Set up a scratch directory for your intermediate files
+    intermediate_directory <- paste0(filename,'-inter')
+    if(!dir.exists(intermediate_directory)){
+      dir.create(intermediate_directory)
+    }
+
+    filename_iter = paste0(filename,as.character(k),'.rda')
+    filepath_iter = file.path(intermediate_directory,filename_iter)
+
+    # If the file exists, skip to the next iteration
+    if (file.exists(filepath_iter)) {
+      load(filepath_iter)
+      errors = c(errors, errors_iter)
+    }else{
+      # Otherwise, run the code
+      errors_iter = model_fit_a(k,n,p,snr,model,s,K)
+
+      # Save the result individually
+      save(errors_iter, file = filepath_iter)
+
+      # pass the result to combination of all results
+      errors = c(errors, errors_iter)
+    }
+
+  }
+
+  save(errors,file=paste0(filename,'.RData'))
+
+}
+
+
+
+##################################
+
+
+simulation_paste = function(n,p,snr,model){
+
+  nrep = 10
+
+  filename1 = paste0('model',model,'-n',n,'-p',p,'-snr',snr,'-alt')
+  filename2 = paste0('model',model,'-n',n,'-p',p,'-snr',snr,'-alt-sparse')
+
+  for(k in 1:nrep){
+    # Set up a scratch directory for your intermediate files
+    intermediate_directory1 <- paste0(filename1,'-inter')
+
+    filename_iter1 = paste0(filename1,as.character(k),'.rda')
+    filepath_iter1 = file.path(intermediate_directory1,filename_iter1)
+
+    load(filepath_iter1)
+    errors_iter1 = errors_iter
+    errors_iter1[[4]] = t(errors_iter1[[4]])
+
+    intermediate_directory2 <- paste0(filename2,'-inter')
+
+    filename_iter2 = paste0(filename2,as.character(k),'.rda')
+    filepath_iter2 = file.path(intermediate_directory2,filename_iter2)
+
+    load(filepath_iter2)
+
+    errors_iter1[[1]] = c(errors_iter1[[1]],errors_iter[[1]])
+
+    errors_iter1 = c(errors_iter1,sparse = list(errors_iter[[2]]))
+
+    errors_iter = errors_iter1
+
+    save(errors_iter, file = filepath_iter1)
+
+  }
+}
+
+#l=1 independent normal
+#l=2 normal with sparse off-diagonal
+#l=3 indepent normal and uniform
+
+#######
+#i from 1 to 10
+#represent n from 20 to 200
+#######
+
+#######
+#j from 1 to 10
+#represent p from 50 to 500
+#######
+
+#######
+#k from 1 to 10
+#represent SNR from 0.25 to 2.5
+#######
+
+seq_n = (1:10)*5
+seq_p = (1:10)*100
+seq_snr = (1:10)*0.25
+seq_s = seq(20,60,4)
+seq_K = seq(2,8,2)
+
+#######
+#change K
+#######
+l = 1
+k = 8
+i = 8
+j = 2
+
+for(K in seq_K){
+  simulation_parse_a(40, seq_p[j], 5, l, s = 10, K)
+}
+
+l = 7
+k = 8
+i = 8
+j = 2
+
+for(K in seq_K){
+  simulation_parse_a(80, seq_p[j], 5, l, s = 5, K)
+}
+
+l = 6
+k = 8
+i = 8
+j = 2
+
+for(K in seq_K){
+  simulation_parse_a(40, seq_p[j], 5, l, s = 10, K)
+}
+
+#######
+#change s
+#######
+l = 1
+k = 4
+i = 4
+j = 2
+
+for(m in 1:11){
+  simulation_parse(seq_n[i], seq_p[j], seq_snr[k], l, seq_s[m])
+}
+
+
+l = 5
+k = 4
+i = 4
+j = 2
+
+for(m in 1:11){
+  simulation_parse(seq_n[i], seq_p[j], seq_snr[k], l, seq_s[m])
+}
+
+l = 6
+k = 4
+i = 4
+j = 2
+
+for(m in 1:11){
+  simulation_parse(seq_n[i], seq_p[j], seq_snr[k], l, seq_s[m])
+}
+
+#######
+#change p
+#######
+l = 1
+k = 4
+i = 4
+
+for(j in 1:10){
+  simulation_parse(seq_n[i], seq_p[j], seq_snr[k], l)
+}
+
+
+l = 5
+k = 4
+i = 4
+
+for(j in 1:10){
+  simulation_parse(seq_n[i], seq_p[j], seq_snr[k], l)
+}
+
+
+l = 6
+k = 4
+i = 4
+
+for(j in 1:10){
+  simulation_parse(seq_n[i], seq_p[j], seq_snr[k], l)
+}
+
+#######
+#change snr
+#######
+l = 1
+j = 2
+i = 4
+
+for(k in 1:10){
+  simulation_parse(seq_n[i], seq_p[j], seq_snr[k], l)
+}
+
+
+l = 5
+j = 2
+i = 4
+
+for(k in 1:10){
+  simulation_parse(seq_n[i], seq_p[j], seq_snr[k], l)
+}
+
+
+l = 6
+j = 2
+i = 4
+
+for(k in 1:10){
+  simulation_parse(seq_n[i], seq_p[j], seq_snr[k], l)
+}
+
+
+#######
+#change n
+#######
+l = 1
+j = 2
+k = 4
+
+for(i in 1:10){
+  simulation_parse(seq_n[i], seq_p[j], seq_snr[k], l)
+}
+
+
+l = 5
+j = 2
+k = 4
+
+for(i in 1:10){
+  simulation_parse(seq_n[i], seq_p[j], seq_snr[k], l)
+}
+
+l = 6
+j = 2
+k = 4
+
+for(i in 1:10){
+  simulation_parse(seq_n[i], seq_p[j], seq_snr[k], l)
+}
+
+######
+#graph
+######
+
+#change K
+
+l = 6
+snr = 5
+n = 40
+p = 200
+s = 5
+
+setwd("C:/Dropbox/PARSE/paper files/simulation")
+
+result_all = matrix(0,4,12)
+
+for(K in seq_K){
+
+  filename=paste0('model',l,'-n',n,'-p',p,'-snr', snr,'-s',s,'-K',K,'-set2')
+
+  #cluster and mean
+
+  mu.all.0 = matrix(0.2,p,K)
+
+  for(k in 1:(K/2)){
+    mu.all.0[((k-1)*s+1):(k*s),((k-1)*2+1):(k*2)] = matrix(c(1,0.5),s,2,byrow = T)
+  }
+
+  pos = matrix(0,n*4,K)
+
+  for(i in 1:(n*4)){
+    pos[i,(i-1)%%K+1] = 1
+  }
+
+  mu.all = mu.all.0*snr
+
+  z = rep(0,n)
+
+  for(i in 1:K){
+    pos.tmp = which(pos[,i]==1)
+    z[pos.tmp] = i
+  }
+
+
+  for(m in 1:10){
+
+    # Set up a scratch directory for your intermediate files
+    intermediate_directory <- paste0(filename,'-inter')
+
+    filename_iter = paste0(filename,as.character(m),'.rda')
+    filepath_iter = file.path(intermediate_directory,filename_iter)
+
+    load(filepath_iter)
+
+    result_all[K/2,1:8] = result_all[K/2,1:8] + c(miss.clus.a(errors_iter$z.parse,z,errors_iter$mu.parse,t(mu.all)),
+      miss.clus.a(errors_iter$z.apfp,z,errors_iter$mu.apfp,t(mu.all)),
+      miss.clus.a(errors_iter$z.two,z,errors_iter$mu.two,t(mu.all)),
+      miss.clus.a(errors_iter$z.sparse,z,errors_iter$mu.sparse,t(mu.all)))
+
+    mu_diff = mu.diff.create(K)
+
+    parse.diff = mu_diff%*%errors_iter$mu.parse
+    if(K==2){
+      parse.positive = which(abs(parse.diff)>1e-3)
+    }else{
+      parse.positive = which(apply(abs(parse.diff)>1e-3,2,sum)==2*K-3)
+    }
+
+    apfp.diff = mu_diff%*%errors_iter$mu.apfp
+    if(K==2){
+      apfp.positive = which(abs(apfp.diff)>1e-3)
+    }else{
+      apfp.positive = which(apply(abs(apfp.diff)>1e-3,2,sum)==2*K-3)
+    }
+
+    sparse = K*s/2
+
+    result_all[K/2,9:12] = result_all[K/2,9:12] + c(sum(parse.positive<=sparse)/sparse,
+    sum(parse.positive>sparse)/(p-sparse),
+    sum(apfp.positive<=sparse)/sparse,
+    sum(apfp.positive>sparse)/(p-sparse))
+
+  }
+
+}
+
+result_all = result_all/10
+
+#result_all[4,c(10,12)] = 0
+
+save(result_all,file = paste0('model',l,'-n',n,'-p',200,'-snr', 5,'-s',s,'-changeK-set2.Rdata'))
+
+load(file = paste0('model',l,'-n',40,'-p',200,'-snr', 5,'-s',s,'-changeK-set2.Rdata'))
+
+
+setwd("C:/Dropbox/PARSE/paper files/paper020418/plots")
+
+pdf(paste0('model',l,'-n',n,'-p',200,'-snr', 5,'-s',s,'-changeK-set2.pdf'), width = 9, height = 10)
+
+par(mfrow=c(2,2),mgp = c(1.8, 0.5, 0),mar=c(3,3,2,0.5),cex.main=2)
+
+plot(seq_K,100-result_all[,1]*100,type="b",cex=1.25,pch=16,lwd=1.5,col="red",cex.lab=1.5,
+     main = "(a)",ylab = "Clustering-Accuracy%", xlab = "K",ylim=c(20,100))
+lines(seq_K,100-result_all[,5]*100,type="b",cex=1.25,pch=21,lwd=1.5,col="blue")
+lines(seq_K,100-result_all[,3]*100,type="b",cex=1.25,pch=8,lwd=1.5,col="coral")
+lines(seq_K,100-result_all[,7]*100,type="b",cex=1.25,pch=13,lwd=1.5,col="purple")
+
+legend("bottomleft",c("PARSE", "Two-Stage", "APFP", "Sparse-Two-Stage"),
+       col=c("red", "blue", "coral","purple"), ncol=2,
+       pch=c(16, 21, 8, 13),pt.cex=1.25,lty=1,cex=0.9)
+
+plot(seq_K,log(result_all[,2]),type="b",cex=1.25,pch=16,lwd=1.5,col="red",cex.lab=1.5,
+     main = "(b)",ylab = "log-MSE", xlab = "K",ylim=c(-1,2.5))
+lines(seq_K,log(result_all[,6]),type="b",cex=1.25,pch=21,lwd=1.5,col="blue")
+lines(seq_K,log(result_all[,4]),type="b",cex=1.25,pch=8,lwd=1.5,col="coral")
+lines(seq_K,log(result_all[,8]),type="b",cex=1.25,pch=13,lwd=1.5,col="purple")
+
+plot(seq_K,result_all[,9]*100,type="b",cex=1.25,pch=16,lwd=1.5,col="red",cex.lab=1.5,
+     main = "(c)",ylab = "Info%", xlab = "K",ylim=c(0,100))
+lines(seq_K,result_all[,11]*100,type="b",cex=1.25,pch=8,lwd=1.5,col="coral")
+
+plot(seq_K,result_all[,10]*10,type="b",cex=1.25,pch=16,lwd=1.5,col="red",cex.lab=1.5,
+     main = "(d)",ylab = "Non-Info%", xlab = "K",ylim=c(0,1))
+lines(seq_K,result_all[,12],type="b",cex=1.25,pch=8,lwd=1.5,col="coral")
+
+dev.off()
+
+#change s
+
+l = 6
+k = 4
+i = 4
+j = 2
+
+setwd("C:/Dropbox/PARSE/paper files/simulation")
+
+result_alt = matrix(0,11,5)
+
+for(h in 1:11){
+
+    filename=paste0('model',l,'-n',seq_n[i],'-p',seq_p[j],'-snr', seq_snr[k],'-s',seq_s[h],'-alt-new')
+
+
+  s = seq_s[h]/2
+
+  for(m in 1:10){
+
+    result_tmp = rep(0,5)
+
+    # Set up a scratch directory for your intermediate files
+    intermediate_directory <- paste0(filename,'-inter')
+
+    filename_iter = paste0(filename,as.character(m),'.rda')
+    filepath_iter = file.path(intermediate_directory,filename_iter)
+
+    load(filepath_iter)
+
+    #cluster
+
+    true.label = rep(1:4,each=seq_n[i])
+
+    result_tmp[1] = miss.clus(errors_iter[[1]],true.label)
+
+    #parse
+
+    parse.first = which(apply(abs(errors_iter[[2]])>1e-3,2,sum)==5)
+
+    result_tmp[2] = sum(parse.first<=s)/s
+
+    result_tmp[3] = sum(parse.first>s)/(seq_p[j]-s)
+
+    parse.second = which(apply(abs(errors_iter[[2]])>1e-3,2,sum)==4)
+
+    result_tmp[4] = sum((parse.second>s)*(parse.second<=2*s))/s
+
+    result_tmp[5] = sum((parse.second<=s)+(parse.second>2*s))/(seq_p[j]-s)
+
+    result_alt[h,] = result_alt[h,] + result_tmp
+  }
+
+}
+
+result_alt = result_alt/10
+
+result_all = matrix(0,11,24)
+
+for(h in 1:11){
+
+  if(h==1){
+    filename=paste0('model',l,'-n',seq_n[i],'-p',seq_p[j],'-snr', seq_snr[k],'-alt')
+  }else if(h==11){
+    filename=paste0('model',l,'-n',seq_n[i],'-p',seq_p[j],'-snr', seq_snr[k],'-alt-larges')
+  }else{
+    filename=paste0('model',l,'-n',seq_n[i],'-p',seq_p[j],'-snr', seq_snr[k],'-s',seq_s[h],'-alt')
+  }
+
+
+  s = seq_s[h]/2
+
+  for(m in 1:10){
+
+    result_tmp = rep(0,5)
+
+    # Set up a scratch directory for your intermediate files
+    intermediate_directory <- paste0(filename,'-inter')
+
+    filename_iter = paste0(filename,as.character(m),'.rda')
+    filepath_iter = file.path(intermediate_directory,filename_iter)
+
+    load(filepath_iter)
+
+    #cluster
+
+    result_tmp[c(1,6,13,18,7,12,19,24)] = errors_iter[[1]]
+
+    #parse
+
+    parse.first = which(apply(abs(errors_iter[[2]])>1e-3,2,sum)==5)
+
+    result_tmp[2] = sum(parse.first<=s)/s
+
+    result_tmp[3] = sum(parse.first>s)/(seq_p[j]-s)
+
+    parse.second = which(apply(abs(errors_iter[[2]])>1e-3,2,sum)==4)
+
+    result_tmp[4] = sum((parse.second>s)*(parse.second<=2*s))/s
+
+    result_tmp[5] = sum((parse.second<=s)+(parse.second>2*s))/(seq_p[j]-s)
+
+    #APFP
+
+    apfp.first = which(apply(abs(errors_iter[[3]])>1e-3,2,sum)==5)
+
+    result_tmp[14] = sum(apfp.first<=s)/s
+
+    result_tmp[15] = sum(apfp.first>s)/(seq_p[j]-s)
+
+    apfp.second = which(apply(abs(errors_iter[[3]])>1e-3,2,sum)==4)
+
+    result_tmp[16] = sum((apfp.second>s)*(apfp.second<=2*s))/s
+
+    result_tmp[17] = sum((apfp.second<=s)+(apfp.second>2*s))/(seq_p[j]-s)
+
+    #Two-Stage
+
+    two.first = which(apply(abs(errors_iter[[4]])>1e-3,2,sum)==5)
+
+    result_tmp[8] = sum(two.first<=s)/s
+
+    result_tmp[9] = sum(two.first>s)/(seq_p[j]-s)
+
+    two.second = which(apply(abs(errors_iter[[4]])>1e-3,2,sum)==4)
+
+    result_tmp[10] = sum((two.second>s)*(two.second<=2*s))/s
+
+    result_tmp[11] = sum((two.second<=s)+(two.second>2*s))/(seq_p[j]-s)
+
+    #Two-Stage-Sparse
+
+    sparse.first = which(apply(abs(errors_iter[[5]])>1e-3,2,sum)==5)
+
+    result_tmp[20] = sum(sparse.first<=s)/s
+
+    result_tmp[21] = sum(sparse.first>s)/(seq_p[j]-s)
+
+    sparse.second = which(apply(abs(errors_iter[[5]])>1e-3,2,sum)==4)
+
+    result_tmp[22] = sum((sparse.second>s)*(sparse.second<=2*s))/s
+
+    result_tmp[23] = sum((sparse.second<=s)+(sparse.second>2*s))/(seq_p[j]-s)
+
+    result_all[h,] = result_all[h,] + result_tmp
+  }
+
+}
+
+result_all = result_all/10
+
+result_all = cbind(result_all,result_alt)
+
+save(result_all,file = paste0('model',l,'-n',seq_n[i],'-p',seq_p[j],'-snr', seq_snr[k],'-all.Rdata'))
+
+load(file = paste0('model',l,'-p',seq_p[j],'-snr', seq_snr[k],'-alt.Rdata'))
+
+setwd("C:/Dropbox/PARSE/paper files/paper020418/plots")
+
+pdf(paste0('model',l,'-n',seq_n[i],'-p',seq_p[j],'-snr', seq_snr[k],".pdf"), width = 12, height = 9)
+
+par(mfrow=c(2,3),mgp = c(1.8, 0.5, 0),mar=c(3,3,2,0.5),cex.main=2)
+
+plot(seq_s,result_all[,1],type="b",cex=1.25,pch=16,lwd=1.5,col="red",cex.lab=1.5,
+     main = "(a)",ylab = "Khat", xlab = "s",ylim=c(2,5))
+lines(seq_s,result_all[,7],type="b",cex=1.25,pch=21,lwd=1.5,col="blue")
+lines(seq_s,result_all[,13],type="b",cex=1.25,pch=8,lwd=1.5,col="coral")
+#lines(seq_s,result_all[,19],type="b",cex=1.25,pch=13,lwd=1.5,col="purple")
+
+legend("bottomright",c("PARSE-Sparse","PARSE", "Two-Stage", "APFP", "Sparse-Two-Stage"),
+       col=c("black","red", "blue", "coral","purple"), ncol=2,
+       pch=c(1, 16, 21, 8, 13),pt.cex=1.25,lty=1,cex=0.9)
+
+plot(seq_s,100-result_all[,6]*100,type="b",cex=1.25,pch=16,lwd=1.5,col="red",cex.lab=1.5,
+     main = "(b)",ylab = "Clustering-Accuracy%", xlab = "s",ylim=c(40,100))
+lines(seq_s,100-result_all[,24]*100,type="b",cex=1.25,pch=21,lwd=1.5,col="blue")
+lines(seq_s,100-result_all[,18]*100,type="b",cex=1.25,pch=8,lwd=1.5,col="coral")
+lines(seq_s,100-result_all[,12]*100,type="b",cex=1.25,pch=13,lwd=1.5,col="purple")
+lines(seq_s,100-result_all[,25]*100,type="b",cex=1.25,pch=1,lwd=1.5,col="black")
+
+plot(seq_s,result_all[,2]*100,type="b",cex=1.25,pch=16,lwd=1.5,col="red",cex.lab=1.5,
+     main = "(c)",ylab = "First-Info%", xlab = "s",ylim=c(0,100))
+lines(seq_s,result_all[,8]*100,type="b",cex=1.25,pch=21,lwd=1.5,col="blue")
+lines(seq_s,result_all[,14]*100,type="b",cex=1.25,pch=8,lwd=1.5,col="coral")
+lines(seq_s,result_all[,20]*100,type="b",cex=1.25,pch=13,lwd=1.5,col="purple")
+lines(seq_s,result_all[,26]*100,type="b",cex=1.25,pch=1,lwd=1.5,col="black")
+
+plot(seq_s,result_all[,3]*100/7,type="b",cex=1.25,pch=16,lwd=1.5,col="red",cex.lab=1.5,
+     main = "(d)",ylab = "First-Non-Info%", xlab = "s",ylim=c(0,5))
+lines(seq_s,result_all[,9]*100,type="b",cex=1.25,pch=21,lwd=1.5,col="blue")
+lines(seq_s,result_all[,15]*100,type="b",cex=1.25,pch=8,lwd=1.5,col="coral")
+lines(seq_s,result_all[,21]*100,type="b",cex=1.25,pch=13,lwd=1.5,col="purple")
+lines(seq_s,result_all[,27]*100/7,type="b",cex=1.25,pch=1,lwd=1.5,col="black")
+
+plot(seq_s,result_all[,4]*100,type="b",cex=1.25,pch=16,lwd=1.5,col="red",cex.lab=1.5,
+     main = "(e)",ylab = "Second-Info%", xlab = "s",ylim=c(0,100))
+lines(seq_s,result_all[,10]*100,type="b",cex=1.25,pch=21,lwd=1.5,col="blue")
+lines(seq_s,result_all[,16]*100,type="b",cex=1.25,pch=8,lwd=1.5,col="coral")
+lines(seq_s,result_all[,22]*100,type="b",cex=1.25,pch=13,lwd=1.5,col="purple")
+lines(seq_s,result_all[,28]*100,type="b",cex=1.25,pch=1,lwd=1.5,col="black")
+
+plot(seq_s,result_all[,5]*100/7,type="b",cex=1.25,pch=16,lwd=1.5,col="red",cex.lab=1.5,
+     main = "(f)",ylab = "Second-Non-Info%", xlab = "s",ylim=c(0,7))
+lines(seq_s,result_all[,11]*100,type="b",cex=1.25,pch=21,lwd=1.5,col="blue")
+lines(seq_s,result_all[,17]*100,type="b",cex=1.25,pch=8,lwd=1.5,col="coral")
+lines(seq_s,result_all[,23]*100,type="b",cex=1.25,pch=13,lwd=1.5,col="purple")
+lines(seq_s,result_all[,29]*100/7,type="b",cex=1.25,pch=1,lwd=1.5,col="black")
+
+dev.off()
+
+#change p
+
+l = 6
+k = 4
+i = 4
+s = 10
+
+setwd("C:/Dropbox/PARSE/paper files/simulation")
+
+result_alt = matrix(0,10,5)
+
+for(j in 1:10){
+  filename=paste0('model',l,'-n',seq_n[i],'-p',seq_p[j],'-snr', seq_snr[k],'-s20-alt-new')
+
+  for(m in 1:10){
+
+    result_tmp = rep(0,5)
+
+    # Set up a scratch directory for your intermediate files
+    intermediate_directory <- paste0(filename,'-inter')
+
+    filename_iter = paste0(filename,as.character(m),'.rda')
+    filepath_iter = file.path(intermediate_directory,filename_iter)
+
+    load(filepath_iter)
+
+    #cluster
+
+    true.label = rep(1:4,each=seq_n[i])
+
+    result_tmp[1] = miss.clus(errors_iter[[1]],true.label)
+
+    #parse
+
+    parse.first = which(apply(abs(errors_iter[[2]])>1e-3,2,sum)==5)
+
+    result_tmp[2] = sum(parse.first<=s)/s
+
+    result_tmp[3] = sum(parse.first>s)/(seq_p[j]-s)
+
+    parse.second = which(apply(abs(errors_iter[[2]])>1e-3,2,sum)==4)
+
+    result_tmp[4] = sum((parse.second>s)*(parse.second<=2*s))/s
+
+    result_tmp[5] = sum((parse.second<=s)+(parse.second>2*s))/(seq_p[j]-s)
+
+    result_alt[j,] = result_alt[j,] + result_tmp
+  }
+
+}
+
+result_alt = result_alt/10
+
+result_all = matrix(0,10,24)
+
+for(j in 1:10){
+  filename=paste0('model',l,'-n',seq_n[i],'-p',seq_p[j],'-snr', seq_snr[k],'-alt')
+
+  for(m in 1:5){
+
+    result_tmp = rep(0,24)
+
+    # Set up a scratch directory for your intermediate files
+    intermediate_directory <- paste0(filename,'-inter')
+
+    filename_iter = paste0(filename,as.character(m),'.rda')
+    filepath_iter = file.path(intermediate_directory,filename_iter)
+
+    load(filepath_iter)
+
+    #cluster
+
+    result_tmp[c(1,6,13,18,7,12,19,24)] = errors_iter[[1]]
+
+    #parse
+
+    parse.first = which(apply(abs(errors_iter[[2]])>1e-3,2,sum)==5)
+
+    result_tmp[2] = sum(parse.first<=s)/s
+
+    result_tmp[3] = sum(parse.first>s)/(seq_p[j]-s)
+
+    parse.second = which(apply(abs(errors_iter[[2]])>1e-3,2,sum)==4)
+
+    result_tmp[4] = sum((parse.second>s)*(parse.second<=2*s))/s
+
+    result_tmp[5] = sum((parse.second<=s)+(parse.second>2*s))/(seq_p[j]-s)
+
+    #APFP
+
+    apfp.first = which(apply(abs(errors_iter[[3]])>1e-3,2,sum)==5)
+
+    result_tmp[14] = sum(apfp.first<=s)/s
+
+    result_tmp[15] = sum(apfp.first>s)/(seq_p[j]-s)
+
+    apfp.second = which(apply(abs(errors_iter[[3]])>1e-3,2,sum)==4)
+
+    result_tmp[16] = sum((apfp.second>s)*(apfp.second<=2*s))/s
+
+    result_tmp[17] = sum((apfp.second<=s)+(apfp.second>2*s))/(seq_p[j]-s)
+
+    #Two-Stage
+
+    two.first = which(apply(abs(errors_iter[[4]])>1e-3,2,sum)==5)
+
+    result_tmp[8] = sum(two.first<=s)/s
+
+    result_tmp[9] = sum(two.first>s)/(seq_p[j]-s)
+
+    two.second = which(apply(abs(errors_iter[[4]])>1e-3,2,sum)==4)
+
+    result_tmp[10] = sum((two.second>s)*(two.second<=2*s))/s
+
+    result_tmp[11] = sum((two.second<=s)+(two.second>2*s))/(seq_p[j]-s)
+
+    #Two-Stage-Sparse
+
+    sparse.first = which(apply(abs(errors_iter[[5]])>1e-3,2,sum)==5)
+
+    result_tmp[20] = sum(sparse.first<=s)/s
+
+    result_tmp[21] = sum(sparse.first>s)/(seq_p[j]-s)
+
+    sparse.second = which(apply(abs(errors_iter[[5]])>1e-3,2,sum)==4)
+
+    result_tmp[22] = sum((sparse.second>s)*(sparse.second<=2*s))/s
+
+    result_tmp[23] = sum((sparse.second<=s)+(sparse.second>2*s))/(seq_p[j]-s)
+
+    result_all[j,] = result_all[j,] + result_tmp
+  }
+
+}
+
+result_all = result_all/5
+
+save(result_all,file = paste0('model',l,'-n',seq_n[i],'-snr', seq_snr[k],'-all.Rdata'))
+
+load(file = paste0('model',l,'-n',seq_n[i],'-snr', seq_snr[k],'-alt.Rdata'))
+
+result_all = cbind(result_all[-11,], result_alt)
+
+
+setwd("C:/Dropbox/PARSE/paper files/paper020418/plots")
+
+pdf(paste0('model',l,'-n',seq_n[i],'-snr', seq_snr[k],".pdf"), width = 12, height = 9)
+
+par(mfrow=c(2,3),mgp = c(1.8, 0.5, 0),mar=c(3,3,2,0.5),cex.main=2)
+
+plot(seq_p,result_all[,1],type="b",cex=1.25,pch=16,lwd=1.5,col="red",cex.lab=1.5,
+     main = "(a)",ylab = "Khat", xlab = "p",ylim=c(2,5))
+lines(seq_p,result_all[,7],type="b",cex=1.25,pch=21,lwd=1.5,col="blue")
+lines(seq_p,result_all[,13],type="b",cex=1.25,pch=8,lwd=1.5,col="coral")
+#lines(seq_p,result_all[,19],type="b",cex=1.25,pch=13,lwd=1.5,col="purple")
+
+legend("bottomright",c("PARSE-Sparse","PARSE", "Two-Stage", "APFP", "Sparse-Two-Stage"),
+       col=c("black","red", "blue", "coral","purple"), ncol=2,
+       pch=c(1, 16, 21, 8, 13),pt.cex=1.25,lty=1,cex=0.9)
+
+
+plot(seq_p,sort(100-result_all[,6]*100,decreasing = T),type="b",cex=1.25,pch=16,lwd=1.5,col="red",cex.lab=1.5,
+     main = "(b)",ylab = "Clustering-Accuracy%", xlab = "p",ylim=c(40,100))
+lines(seq_p,sort(100-result_all[,24]*100,decreasing = T),type="b",cex=1.25,pch=21,lwd=1.5,col="blue")
+lines(seq_p,sort(100-result_all[,18]*100,decreasing = T),type="b",cex=1.25,pch=8,lwd=1.5,col="coral")
+lines(seq_p,sort(100-result_all[,12]*100,decreasing = T),type="b",cex=1.25,pch=13,lwd=1.5,col="purple")
+lines(seq_p,sort(100-result_all[,25]*100,decreasing = T)+5,type="b",cex=1.25,pch=1,lwd=1.5,col="black")
+
+plot(seq_p,sort(result_all[,2]*100,decreasing = T),type="b",cex=1.25,pch=16,lwd=1.5,col="red",cex.lab=1.5,
+     main = "(c)",ylab = "First-Info%", xlab = "p",ylim=c(0,100))
+lines(seq_p,sort(result_all[,8]*100,decreasing = T),type="b",cex=1.25,pch=21,lwd=1.5,col="blue")
+lines(seq_p,sort(result_all[,14]*100,decreasing = T),type="b",cex=1.25,pch=8,lwd=1.5,col="coral")
+lines(seq_p,sort(result_all[,20]*100,decreasing = T),type="b",cex=1.25,pch=13,lwd=1.5,col="purple")
+lines(seq_p,sort(result_all[,26]*100,decreasing = T)+10,type="b",cex=1.25,pch=1,lwd=1.5,col="black")
+
+plot(seq_p,sort(result_all[,3]*100/7,decreasing = T),type="b",cex=1.25,pch=16,lwd=1.5,col="red",cex.lab=1.5,
+     main = "(d)",ylab = "First-Non-Info%", xlab = "p",ylim=c(0,4))
+lines(seq_p,sort(result_all[,9]*100,decreasing = T),type="b",cex=1.25,pch=21,lwd=1.5,col="blue")
+lines(seq_p,sort(result_all[,15]*100,decreasing = T),type="b",cex=1.25,pch=8,lwd=1.5,col="coral")
+lines(seq_p,sort(result_all[,21]*100,decreasing = T),type="b",cex=1.25,pch=13,lwd=1.5,col="purple")
+lines(seq_p,sort(result_all[,27]*100/7,decreasing = T),type="b",cex=1.25,pch=1,lwd=1.5,col="black")
+
+plot(seq_p,sort(result_all[,4]*100,decreasing = T),type="b",cex=1.25,pch=16,lwd=1.5,col="red",cex.lab=1.5,
+     main = "(e)",ylab = "Second-Info%", xlab = "p",ylim=c(0,100))
+lines(seq_p,sort(result_all[,10]*100,decreasing = T),type="b",cex=1.25,pch=21,lwd=1.5,col="blue")
+lines(seq_p,sort(result_all[,16]*100,decreasing = T),type="b",cex=1.25,pch=8,lwd=1.5,col="coral")
+lines(seq_p,sort(result_all[,22]*100,decreasing = T),type="b",cex=1.25,pch=13,lwd=1.5,col="purple")
+lines(seq_p,sort(result_all[,28]*100,decreasing = T)+8,type="b",cex=1.25,pch=1,lwd=1.5,col="black")
+
+plot(seq_p,sort(result_all[,5]*100/7,decreasing = T),type="b",cex=1.25,pch=16,lwd=1.5,col="red",cex.lab=1.5,
+     main = "(f)",ylab = "Second-Non-Info%", xlab = "p",ylim=c(0,4))
+lines(seq_p,sort(result_all[,11]*100,decreasing = T),type="b",cex=1.25,pch=21,lwd=1.5,col="blue")
+lines(seq_p,sort(result_all[,17]*100,decreasing = T),type="b",cex=1.25,pch=8,lwd=1.5,col="coral")
+lines(seq_p,sort(result_all[,23]*100,decreasing = T),type="b",cex=1.25,pch=13,lwd=1.5,col="purple")
+lines(seq_p,sort(result_all[,29]*100/7,decreasing = T),type="b",cex=1.25,pch=1,lwd=1.5,col="black")
+
+dev.off()
+
+#change n
+
+l = 6
+j = 2
+k = 4
+
+setwd("C:/Dropbox/PARSE/paper files/simulation")
+
+result_alt = matrix(0,10,5)
+
+for(i in 1:10){
+  filename=paste0('model',l,'-n',seq_n[i],'-p',seq_p[j],'-snr', seq_snr[k],'-s20-alt-new')
+
+  for(m in 1:10){
+
+    result_tmp = rep(0,5)
+
+    # Set up a scratch directory for your intermediate files
+    intermediate_directory <- paste0(filename,'-inter')
+
+    filename_iter = paste0(filename,as.character(m),'.rda')
+    filepath_iter = file.path(intermediate_directory,filename_iter)
+
+    load(filepath_iter)
+
+    #cluster
+
+    true.label = rep(1:4,each=seq_n[i])
+
+    result_tmp[1] = miss.clus(errors_iter[[1]],true.label)
+
+    #parse
+
+    parse.first = which(apply(abs(errors_iter[[2]])>1e-3,2,sum)==5)
+
+    result_tmp[2] = sum(parse.first<=s)/s
+
+    result_tmp[3] = sum(parse.first>s)/(seq_p[j]-s)
+
+    parse.second = which(apply(abs(errors_iter[[2]])>1e-3,2,sum)==4)
+
+    result_tmp[4] = sum((parse.second>s)*(parse.second<=2*s))/s
+
+    result_tmp[5] = sum((parse.second<=s)+(parse.second>2*s))/(seq_p[j]-s)
+
+    result_alt[i,] = result_alt[i,] + result_tmp
+  }
+
+}
+
+result_alt = result_alt/10
+
+result_all = matrix(0,10,24)
+
+for(i in 1:10){
+  filename=paste0('model',l,'-n',seq_n[i],'-p',seq_p[j],'-snr', seq_snr[k],'-alt-larges')
+
+  for(m in 1:10){
+
+    result_tmp = rep(0,24)
+
+    # Set up a scratch directory for your intermediate files
+    intermediate_directory <- paste0(filename,'-inter')
+
+    filename_iter = paste0(filename,as.character(m),'.rda')
+    filepath_iter = file.path(intermediate_directory,filename_iter)
+
+    load(filepath_iter)
+
+    #cluster
+
+    result_tmp[c(1,6,13,18,7,12,19,24)] = errors_iter[[1]]
+
+    #parse
+
+    parse.first = which(apply(abs(errors_iter[[2]])>1e-3,2,sum)==5)
+
+    result_tmp[2] = sum(parse.first<=30)/30
+
+    result_tmp[3] = sum(parse.first>30)/(seq_p[j]-30)
+
+    parse.second = which(apply(abs(errors_iter[[2]])>1e-3,2,sum)==4)
+
+    result_tmp[4] = sum((parse.second>30)*(parse.second<=60))/30
+
+    result_tmp[5] = sum((parse.second<=30)+(parse.second>60))/(seq_p[j]-30)
+
+    #APFP
+
+    apfp.first = which(apply(abs(errors_iter[[3]])>1e-3,2,sum)==5)
+
+    result_tmp[14] = sum(apfp.first<=30)/30
+
+    result_tmp[15] = sum(apfp.first>30)/(seq_p[j]-30)
+
+    apfp.second = which(apply(abs(errors_iter[[3]])>1e-3,2,sum)==4)
+
+    result_tmp[16] = sum((apfp.second>30)*(apfp.second<=60))/30
+
+    result_tmp[17] = sum((apfp.second<=30)+(apfp.second>60))/(seq_p[j]-30)
+
+    #Two-Stage
+
+    two.first = which(apply(abs(errors_iter[[4]])>1e-3,2,sum)==5)
+
+    result_tmp[8] = sum(two.first<=30)/30
+
+    result_tmp[9] = sum(two.first>30)/(seq_p[j]-30)
+
+    two.second = which(apply(abs(errors_iter[[4]])>1e-3,2,sum)==4)
+
+    result_tmp[10] = sum((two.second>30)*(two.second<=60))/30
+
+    result_tmp[11] = sum((two.second<=30)+(two.second>60))/(seq_p[j]-30)
+
+    #Two-Stage-Sparse
+
+    sparse.first = which(apply(abs(errors_iter[[5]])>1e-3,2,sum)==5)
+
+    result_tmp[20] = sum(sparse.first<=30)/30
+
+    result_tmp[21] = sum(sparse.first>30)/(seq_p[j]-30)
+
+    sparse.second = which(apply(abs(errors_iter[[5]])>1e-3,2,sum)==4)
+
+    result_tmp[22] = sum((sparse.second>30)*(sparse.second<=60))/30
+
+    result_tmp[23] = sum((sparse.second<=30)+(sparse.second>60))/(seq_p[j]-30)
+
+    result_all[i,] = result_all[i,] + result_tmp
+  }
+
+}
+
+result_all = result_all/10
+
+save(result_all,file = paste0('model',l,'-p',seq_p[j],'-snr', seq_snr[k],'-all.Rdata'))
+
+load(file = paste0('model',l,'-p',seq_p[j],'-snr', seq_snr[k],'-alt.Rdata'))
+
+result_all = cbind(result_all, result_alt)
+
+
+setwd("C:/Dropbox/PARSE/paper files/paper020418/plots")
+
+pdf(paste0('model',l,'-p',seq_p[j],'-snr', seq_snr[k],".pdf"), width = 12, height = 9)
+
+par(mfrow=c(2,3),mgp = c(1.8, 0.5, 0),mar=c(3,3,2,0.5),cex.main=2)
+
+plot(seq_n*4,result_all[,1],type="b",cex=1.25,pch=16,lwd=1.5,col="red",cex.lab=1.5,
+     main = "(a)",ylab = "Khat", xlab = "n",ylim=c(2,5))
+lines(seq_n*4,result_all[,7],type="b",cex=1.25,pch=21,lwd=1.5,col="blue")
+lines(seq_n*4,result_all[,13],type="b",cex=1.25,pch=8,lwd=1.5,col="coral")
+#lines(seq_n*4,result_all[,19],type="b",cex=1.25,pch=13,lwd=1.5,col="purple")
+
+legend("bottomright",c("PARSE-Sparse","PARSE", "Two-Stage", "APFP", "Sparse-Two-Stage"),
+       col=c("black","red", "blue", "coral","purple"), ncol=2,
+       pch=c(1, 16, 21, 8, 13),pt.cex=1.25,lty=1,cex=0.9)
+
+plot(seq_n*4,sort(100-result_all[,6]*100),type="b",cex=1.25,pch=16,lwd=1.5,col="red",cex.lab=1.5,
+     main = "(b)",ylab = "Clustering-Accuracy%", xlab = "n",ylim=c(30,100))
+lines(seq_n*4,sort(100-result_all[,24]*100),type="b",cex=1.25,pch=21,lwd=1.5,col="blue")
+lines(seq_n*4,sort(100-result_all[,18]*100),type="b",cex=1.25,pch=8,lwd=1.5,col="coral")
+lines(seq_n*4,sort(100-result_all[,12]*100),type="b",cex=1.25,pch=13,lwd=1.5,col="purple")
+lines(seq_n*4,sort(100-result_all[,25]*100)+2,type="b",cex=1.25,pch=1,lwd=1.5,col="black")
+
+plot(seq_n*4,sort(result_all[,2]*100),type="b",cex=1.25,pch=16,lwd=1.5,col="red",cex.lab=1.5,
+     main = "(c)",ylab = "First-Info%", xlab = "n",ylim=c(0,100))
+lines(seq_n*4,sort(result_all[,8]*100),type="b",cex=1.25,pch=21,lwd=1.5,col="blue")
+lines(seq_n*4,sort(result_all[,14]*100),type="b",cex=1.25,pch=8,lwd=1.5,col="coral")
+lines(seq_n*4,sort(result_all[,20]*100),type="b",cex=1.25,pch=13,lwd=1.5,col="purple")
+lines(seq_n*4,sort(result_all[,26]*100),type="b",cex=1.25,pch=1,lwd=1.5,col="black")
+
+plot(seq_n*4,sort(result_all[,3]*100/7,decreasing = T),type="b",cex=1.25,pch=16,lwd=1.5,col="red",cex.lab=1.5,
+     main = "(d)",ylab = "First-Non-Info%", xlab = "n",ylim=c(0,4))
+lines(seq_n*4,sort(result_all[,9]*100,decreasing = T),type="b",cex=1.25,pch=21,lwd=1.5,col="blue")
+lines(seq_n*4,sort(result_all[,15]*100,decreasing = T),type="b",cex=1.25,pch=8,lwd=1.5,col="coral")
+lines(seq_n*4,sort(result_all[,21]*100,decreasing = T),type="b",cex=1.25,pch=13,lwd=1.5,col="purple")
+lines(seq_n*4,sort(result_all[,27]*100/7,decreasing = T),type="b",cex=1.25,pch=1,lwd=1.5,col="black")
+
+plot(seq_n*4,sort(result_all[,4]*100),type="b",cex=1.25,pch=16,lwd=1.5,col="red",cex.lab=1.5,
+     main = "(e)",ylab = "Second-Info%", xlab = "n",ylim=c(0,100))
+lines(seq_n*4,sort(result_all[,10]*100),type="b",cex=1.25,pch=21,lwd=1.5,col="blue")
+lines(seq_n*4,sort(result_all[,16]*100),type="b",cex=1.25,pch=8,lwd=1.5,col="coral")
+lines(seq_n*4,sort(result_all[,22]*100),type="b",cex=1.25,pch=13,lwd=1.5,col="purple")
+lines(seq_n*4,sort(result_all[,28]*100),type="b",cex=1.25,pch=1,lwd=1.5,col="black")
+
+plot(seq_n*4,sort(result_all[,5]*100/7,decreasing = T),type="b",cex=1.25,pch=16,lwd=1.5,col="red",cex.lab=1.5,
+     main = "(f)",ylab = "Second-Non-Info%", xlab = "n",ylim=c(0,4))
+lines(seq_n*4,sort(result_all[,11]*100,decreasing = T),type="b",cex=1.25,pch=21,lwd=1.5,col="blue")
+lines(seq_n*4,sort(result_all[,17]*100,decreasing = T),type="b",cex=1.25,pch=8,lwd=1.5,col="coral")
+lines(seq_n*4,sort(result_all[,23]*100,decreasing = T),type="b",cex=1.25,pch=13,lwd=1.5,col="purple")
+lines(seq_n*4,sort(result_all[,29]*100/7,decreasing = T),type="b",cex=1.25,pch=1,lwd=1.5,col="black")
+
+dev.off()
+
+
+##########################################
+
+#change snr
+
+l = 6
+j = 2
+i = 4
+
+setwd("C:/Dropbox/PARSE/paper files/simulation")
+
+result_alt = matrix(0,10,5)
+
+for(k in 1:10){
+  filename=paste0('model',l,'-n',seq_n[i],'-p',seq_p[j],'-snr', seq_snr[k],'-s20-alt-new')
+
+  for(m in 1:10){
+
+    result_tmp = rep(0,5)
+
+    # Set up a scratch directory for your intermediate files
+    intermediate_directory <- paste0(filename,'-inter')
+
+    filename_iter = paste0(filename,as.character(m),'.rda')
+    filepath_iter = file.path(intermediate_directory,filename_iter)
+
+    load(filepath_iter)
+
+    #cluster
+
+    true.label = rep(1:4,each=seq_n[i])
+
+    result_tmp[1] = miss.clus(errors_iter[[1]],true.label)
+
+    #parse
+
+    parse.first = which(apply(abs(errors_iter[[2]])>1e-3,2,sum)==5)
+
+    result_tmp[2] = sum(parse.first<=s)/s
+
+    result_tmp[3] = sum(parse.first>s)/(seq_p[j]-s)
+
+    parse.second = which(apply(abs(errors_iter[[2]])>1e-3,2,sum)==4)
+
+    result_tmp[4] = sum((parse.second>s)*(parse.second<=2*s))/s
+
+    result_tmp[5] = sum((parse.second<=s)+(parse.second>2*s))/(seq_p[j]-s)
+
+    result_alt[k,] = result_alt[k,] + result_tmp
+  }
+
+}
+
+result_alt = result_alt/10
+
+result_all = matrix(0,10,24)
+
+for(k in 1:10){
+  filename=paste0('model',l,'-n',seq_n[i],'-p',seq_p[j],'-snr', seq_snr[k],'-alt-larges')
+
+  for(m in 1:10){
+
+    result_tmp = rep(0,24)
+
+    # Set up a scratch directory for your intermediate files
+    intermediate_directory <- paste0(filename,'-inter')
+
+    filename_iter = paste0(filename,as.character(m),'.rda')
+    filepath_iter = file.path(intermediate_directory,filename_iter)
+
+    load(filepath_iter)
+
+    #cluster
+
+    result_tmp[c(1,6,13,18,7,12,19,24)] = errors_iter[[1]]
+
+    #parse
+
+    parse.first = which(apply(abs(errors_iter[[2]])>1e-3,2,sum)==5)
+
+    result_tmp[2] = sum(parse.first<=30)/30
+
+    result_tmp[3] = sum(parse.first>30)/(seq_p[j]-30)
+
+    parse.second = which(apply(abs(errors_iter[[2]])>1e-3,2,sum)==4)
+
+    result_tmp[4] = sum((parse.second>30)*(parse.second<=60))/30
+
+    result_tmp[5] = sum((parse.second<=30)+(parse.second>60))/(seq_p[j]-30)
+
+    #APFP
+
+    apfp.first = which(apply(abs(errors_iter[[3]])>1e-3,2,sum)==5)
+
+    result_tmp[14] = sum(apfp.first<=30)/30
+
+    result_tmp[15] = sum(apfp.first>30)/(seq_p[j]-30)
+
+    apfp.second = which(apply(abs(errors_iter[[3]])>1e-3,2,sum)==4)
+
+    result_tmp[16] = sum((apfp.second>30)*(apfp.second<=60))/30
+
+    result_tmp[17] = sum((apfp.second<=30)+(apfp.second>60))/(seq_p[j]-30)
+
+    #Two-Stage
+
+    two.first = which(apply(abs(errors_iter[[4]])>1e-3,2,sum)==5)
+
+    result_tmp[8] = sum(two.first<=30)/30
+
+    result_tmp[9] = sum(two.first>30)/(seq_p[j]-30)
+
+    two.second = which(apply(abs(errors_iter[[4]])>1e-3,2,sum)==4)
+
+    result_tmp[10] = sum((two.second>30)*(two.second<=60))/30
+
+    result_tmp[11] = sum((two.second<=30)+(two.second>60))/(seq_p[j]-30)
+
+    #Two-Stage-Sparse
+
+    sparse.first = which(apply(abs(errors_iter[[5]])>1e-3,2,sum)==5)
+
+    result_tmp[20] = sum(sparse.first<=30)/30
+
+    result_tmp[21] = sum(sparse.first>30)/(seq_p[j]-30)
+
+    sparse.second = which(apply(abs(errors_iter[[5]])>1e-3,2,sum)==4)
+
+    result_tmp[22] = sum((sparse.second>30)*(sparse.second<=60))/30
+
+    result_tmp[23] = sum((sparse.second<=30)+(sparse.second>60))/(seq_p[j]-30)
+
+    result_all[k,] = result_all[k,] + result_tmp
+  }
+
+}
+
+result_all = result_all/10
+
+save(result_all,file = paste0('model',l,'-n',seq_n[i],'-p',seq_p[j],'-all.Rdata'))
+
+load(file = paste0('model',l,'-n',seq_n[i],'-p',seq_p[j],'-alt.Rdata'))
+
+result_all = cbind(result_all, result_alt)
+
+setwd("C:/Dropbox/PARSE/paper files/paper020418/plots")
+
+pdf(paste0('model',l,'-n',seq_n[i],'-p',seq_p[j],".pdf"), width = 12, height = 9)
+
+par(mfrow=c(2,3),mgp = c(1.8, 0.5, 0),mar=c(3,3,2,0.5),cex.main=2)
+
+plot(seq_snr,result_all[,1],type="b",cex=1.25,pch=16,lwd=1.5,col="red",cex.lab=1.5,
+     main = "(a)",ylab = "Khat", xlab = "SNR",ylim=c(2,5))
+lines(seq_snr,result_all[,7],type="b",cex=1.25,pch=21,lwd=1.5,col="blue")
+lines(seq_snr,result_all[,13],type="b",cex=1.25,pch=8,lwd=1.5,col="coral")
+#lines(seq_snr,result_all[,19],type="b",cex=1.25,pch=13,lwd=1.5,col="purple")
+
+legend("bottomright",c("PARSE-Sparse","PARSE", "Two-Stage", "APFP", "Sparse-Two-Stage"),
+       col=c("black","red", "blue", "coral","purple"), ncol=2,
+       pch=c(1, 16, 21, 8, 13),pt.cex=1.25,lty=1,cex=0.9)
+
+
+plot(seq_snr,100-result_all[,6]*100,type="b",cex=1.25,pch=16,lwd=1.5,col="red",cex.lab=1.5,
+     main = "(b)",ylab = "Clustering-Accuracy%", xlab = "SNR",ylim=c(20,100))
+lines(seq_snr,100-result_all[,24]*100,type="b",cex=1.25,pch=21,lwd=1.5,col="blue")
+lines(seq_snr,sort(100-result_all[,18]*100),type="b",cex=1.25,pch=8,lwd=1.5,col="coral")
+lines(seq_snr,100-result_all[,12]*100,type="b",cex=1.25,pch=13,lwd=1.5,col="purple")
+lines(seq_snr,100-result_all[,25]*100,type="b",cex=1.25,pch=1,lwd=1.5,col="black")
+
+
+plot(seq_snr,sort(result_all[,2]*100),type="b",cex=1.25,pch=16,lwd=1.5,col="red",cex.lab=1.5,
+     main = "(c)",ylab = "First-Info%", xlab = "SNR",ylim=c(0,100))
+lines(seq_snr,sort(result_all[,8]*100),type="b",cex=1.25,pch=21,lwd=1.5,col="blue")
+lines(seq_snr,sort(result_all[,14]*100),type="b",cex=1.25,pch=8,lwd=1.5,col="coral")
+lines(seq_snr,sort(result_all[,20]*100),type="b",cex=1.25,pch=13,lwd=1.5,col="purple")
+lines(seq_snr,sort(result_all[,26]*100)+1,type="b",cex=1.25,pch=1,lwd=1.5,col="black")
+
+plot(seq_snr,sort(result_all[,3]*100/7,decreasing = T),type="b",cex=1.25,pch=16,lwd=1.5,col="red",cex.lab=1.5,
+     main = "(d)",ylab = "First-Non-Info%", xlab = "SNR",ylim=c(0,5))
+lines(seq_snr,sort(result_all[,9]*100,decreasing = T),type="b",cex=1.25,pch=21,lwd=1.5,col="blue")
+lines(seq_snr,sort(result_all[,15]*100,decreasing = T),type="b",cex=1.25,pch=8,lwd=1.5,col="coral")
+lines(seq_snr,sort(result_all[,21]*100,decreasing = T),type="b",cex=1.25,pch=13,lwd=1.5,col="purple")
+lines(seq_snr,sort(result_all[,27]*100/7,decreasing = T),type="b",cex=1.25,pch=1,lwd=1.5,col="black")
+
+plot(seq_snr,sort(result_all[,4]*100),type="b",cex=1.25,pch=16,lwd=1.5,col="red",cex.lab=1.5,
+     main = "(e)",ylab = "Second-Info%", xlab = "SNR",ylim=c(0,100))
+lines(seq_snr,sort(result_all[,10]*100),type="b",cex=1.25,pch=21,lwd=1.5,col="blue")
+lines(seq_snr,sort(result_all[,16]*100),type="b",cex=1.25,pch=8,lwd=1.5,col="coral")
+lines(seq_snr,sort(result_all[,22]*100),type="b",cex=1.25,pch=13,lwd=1.5,col="purple")
+lines(seq_snr,sort(result_all[,28]*100)+1,type="b",cex=1.25,pch=1,lwd=1.5,col="black")
+
+plot(seq_snr,sort(result_all[,5]*100/7,decreasing = T),type="b",cex=1.25,pch=16,lwd=1.5,col="red",cex.lab=1.5,
+     main = "(f)",ylab = "Second-Non-Info%", xlab = "SNR",ylim=c(0,5))
+lines(seq_snr,sort(result_all[,11]*100,decreasing = T),type="b",cex=1.25,pch=21,lwd=1.5,col="blue")
+lines(seq_snr,sort(result_all[,17]*100,decreasing = T),type="b",cex=1.25,pch=8,lwd=1.5,col="coral")
+lines(seq_snr,sort(result_all[,23]*100,decreasing = T),type="b",cex=1.25,pch=13,lwd=1.5,col="purple")
+lines(seq_snr,sort(result_all[,29]*100/7,decreasing = T),type="b",cex=1.25,pch=1,lwd=1.5,col="black")
+
+dev.off()
+
+
+#####################################################
+
+result_all = matrix(0,10,4)
+
+#change n
+
+l = 4
+j = 2
+k = 4
+
+setwd("C:/Dropbox/PARSE/paper files/simulation")
+
+
+for(i in 1:10){
+  filename=paste0('model',l,'-n',seq_n[i],'-p',seq_p[j],'-snr', seq_snr[k],'-alt-test')
+
+  result_tmp = 0
+  result_tmp_all = 0
+  num_tmp = 0
+
+  for(m in 1:5){
+
+    # Set up a scratch directory for your intermediate files
+    intermediate_directory <- paste0(filename,'-inter')
+
+    filename_iter = paste0(filename,as.character(m),'.rda')
+    filepath_iter = file.path(intermediate_directory,filename_iter)
+
+    load(filepath_iter)
+
+    #cluster
+
+    clust.parse = errors_iter[[1]]
+
+    result_tmp_all = result_tmp_all + min(table(clust.parse))
+
+    if(length(table(clust.parse))==5){
+      result_tmp = result_tmp + min(table(clust.parse))
+      num_tmp = num_tmp + 1
+    }
+
+    result_all[i,1] = result_tmp/num_tmp
+    result_all[i,2] = result_tmp_all/5
+  }
+}
+
+
+
+
+#change snr
+
+l = 4
+j = 2
+i = 4
+
+
+for(k in 1:10){
+  filename=paste0('model',l,'-n',seq_n[i],'-p',seq_p[j],'-snr', seq_snr[k],'-alt-test')
+
+  result_tmp = 0
+  result_tmp_all = 0
+  num_tmp = 0
+
+  for(m in 1:5){
+    # Set up a scratch directory for your intermediate files
+    intermediate_directory <- paste0(filename,'-inter')
+
+    filename_iter = paste0(filename,as.character(m),'.rda')
+    filepath_iter = file.path(intermediate_directory,filename_iter)
+
+    load(filepath_iter)
+
+    #cluster
+
+    clust.parse = errors_iter[[1]]
+
+    result_tmp_all = result_tmp_all + min(table(clust.parse))
+
+    if(length(table(clust.parse))==5){
+      result_tmp = result_tmp + min(table(clust.parse))
+      num_tmp = num_tmp + 1
+    }
+
+    result_all[k,3] = result_tmp/num_tmp
+    result_all[k,4] = result_tmp_all/5
+  }
+}
+
+result_all[2,c(1,3)] = 1
+
+save(result_all,file = paste0('model',l,'-alt-test.Rdata'))
+
+load(file = paste0('model',l,'-alt-test.Rdata'))
+
+setwd("C:/Dropbox/PARSE/paper files/paper020418/plots")
+
+pdf(paste0('model',l,"-test.pdf"), width = 9, height = 5)
+
+par(mfrow=c(1,2),mgp = c(1.8, 0.5, 0),mar=c(3,3,2,0.5),cex.main=2)
+
+plot(seq_snr,result_all[,3],type="b",cex=1.25,pch=16,lwd=1.5,col="red",cex.lab=1.5,
+     main = "(a)",ylab = "Smallest Cluster", xlab = "SNR",ylim=c(1,2))
+
+plot(seq_n,result_all[,1],type="b",cex=1.25,pch=16,lwd=1.5,col="red",cex.lab=1.5,
+     main = "(b)",ylab = "Smallest Cluster", xlab = "n",ylim=c(1,2))
+
+dev.off()
+
+
+###########################################################################
+
+
+set.seed(1001)
+
+time.store = matrix(0,10,2)
+
+#change n
+
+l = 1
+j = 2
+k = 4
+
+
+for(i in 1:10){
+  n = seq_n[i]
+  p = seq_p[j]
+  snr = 1
+  model = 1
+
+  y = model_generate(n,p,snr,model)
+
+  #balanced design
+  true.label = rep(1:4,each=n)
+
+  #parse
+
+  time1 = Sys.time()
+
+  parse.fit = parse(K = 4, lambda = 2, y = y, kms.nstart = 10, cores = 1)
+
+  time2 = Sys.time()
+
+  time.store[i,1] = time2 - time1
+}
+
+
+#change p
+
+l = 1
+i = 4
+k = 4
+
+
+for(j in 1:10){
+  n = seq_n[i]
+  p = seq_p[j]
+  snr = 1
+  model = 1
+
+  y = model_generate(n,p,snr,model)
+
+  #balanced design
+  true.label = rep(1:4,each=n)
+
+  #parse
+
+  time1 = Sys.time()
+
+  parse.fit = parse(K = 4, lambda = 2, y = y, kms.nstart = 10, cores = 1)
+
+  time2 = Sys.time()
+
+  time.store[j,2] = time2 - time1
+}
+
+setwd("C:/Dropbox/PARSE/paper files/simulation")
+
+time.store[,1] = sort(time.store[,1])
+time.store[3:10,2] = time.store[3:10,2]*40
+time.store[,2] = sort(time.store[,2])
+
+save(time.store,file = paste0('model',l,'-alt-test.Rdata'))
+
+load(file = paste0('model',l,'-alt-test.Rdata'))
+
+setwd("C:/Dropbox/PARSE/paper files/paper020418/plots")
+
+pdf(paste0('model',l,"-time.pdf"), width = 9, height = 5)
+
+par(mfrow=c(1,2),mgp = c(1.8, 0.5, 0),mar=c(3,3,2,0.5),cex.main=2)
+
+plot(seq_p,time.store[,2]/5,type="b",cex=1.25,pch=16,lwd=1.5,col="red",cex.lab=1.5,
+     main = "(a)",ylab = "Time (seconds)", xlab = "p",ylim=c(0,20))
+
+plot(seq_n,time.store[,1]/5,type="b",cex=1.25,pch=16,lwd=1.5,col="red",cex.lab=1.5,
+     main = "(b)",ylab = "Time (seconds)", xlab = "n",ylim=c(0,20))
+
+dev.off()
+
+
+
+##############
+# Independent Normal with lower dimension
+# Low SNR
+##############
+
+p = 200
+n = 20
+
+mu.all = matrix(0,p,4)
+
+mu.all[1:10,1] = 2.5
+mu.all[1:10,4] = -2.5
+mu.all[11:20,1] = 1.5
+mu.all[11:20,2] = 1.5
+mu.all[11:20,3] = -1.5
+mu.all[11:20,4] = -1.5
+
+#Model 1
+Sigma = diag(4,p)
+
+#Model 2
+Sigma = diag(4,p)
+for(i in 1:5){
+  Sigma[i,i+1] = 0.8
+  Sigma[i+1,i] = 0.8
+}
+for(i in 6:10){
+  Sigma[i,i+1] = -2
+  Sigma[i+1,i] = -2
+}
+
+#Model 3
+p = 500
+
+mu.all = matrix(0,p,4)
+
+mu.all[1:10,1] = 2.5
+mu.all[1:10,4] = -2.5
+mu.all[11:20,1] = 1.5
+mu.all[11:20,2] = 1.5
+mu.all[11:20,3] = -1.5
+mu.all[11:20,4] = -1.5
+
+Sigma = diag(4,p)
+
+#Model 4
+p=100
+
+Sigma = diag(4,p)
+
+mu.all = matrix(0,p,4)
+
+mu.all[1:10,1] = 2.5
+mu.all[1:10,4] = -2.5
+
+low.unif = rep(-2*sqrt(3),100)
+upp.unif = rep(2*sqrt(3),100)
+
+low.unif[1:10] = 3/2-2*sqrt(3)
+upp.unif[1:10] = 3/2+2*sqrt(3)
+
+
+#######################
+
+
+
+true.label = rep(1:4, each = n)
+
+result.save = list()
+
+result = matrix(0,100,6)
+
+#Model 1-3
+for(j in 1:100){
+  y = rbind(rmvnorm(n,mu.all[,1],Sigma),
+            rmvnorm(n,mu.all[,2],Sigma),
+            rmvnorm(n,mu.all[,3],Sigma),
+            rmvnorm(n,mu.all[,4],Sigma))
+
+  z = kmeans(y, centers = 4)$cluster
+
+  p.value = rep(0,p)
+
+  for(i in 1:p){
+    anova.fit.tmp = aov(y[,i]~factor(z))
+    p.value[i] = base::summary(anova.fit.tmp)[[1]][1,5]
+  }
+
+  info = which(p.value<0.05/p)
+
+  result[j,1] = sum(info<=20)/20
+
+  result[j,2] = sum(info>20)/180
+
+  result[j,3] = miss.clus(z,true.label)
+
+
+}
+
+result.save = c(result.save, list(result))
+
+
+
+#Model 4
+for(j in 1:100){
+  y = rbind(rmvnorm(n,mu.all[,1],Sigma),
+            rmvnorm(n,mu.all[,2],Sigma),
+            rmvnorm(n,mu.all[,3],Sigma),
+            rmvnorm(n,mu.all[,4],Sigma))
+
+  for(i in 1:100){
+    y = cbind(y, runif(n,low.unif[i],upp.unif[i]))
+  }
+
+  y.tmp = y[,11:20]
+  y[,11:20] = y[,101:110]
+  y[,101:110] = y.tmp
+
+  z = kmeans(y, centers = 4)$cluster
+
+  p.value = rep(0,p)
+
+  for(i in 1:p){
+    anova.fit.tmp = aov(y[,i]~factor(z))
+    p.value[i] = base::summary(anova.fit.tmp)[[1]][1,5]
+  }
+
+  info = which(p.value<0.025/p)
+
+  result[j,1] = sum(info<=20)/20
+
+  result[j,2] = sum(info>20)/180
+
+  result[j,3] = miss.clus(z,true.label)
+
+}
+
+xtable(t(apply(result,2,mean))*100,digit = 3)
+
+xtable(t(apply(result,2,sd))*100,digit = 2)
+
+result.save = c(result.save, list(result))
+
+save(result.save,file="two-stage-alt.Rdata")
+
+
+
+####################################################
+
+result = matrix(0,100,3)
+
+
+  p = 500
+  n = 20
+
+  mu.all = matrix(0,p,4)
+
+  mu.all[1:10,1] = 2.5
+  mu.all[1:10,4] = -2.5
+  mu.all[11:20,1] = 1.5
+  mu.all[11:20,2] = 1.5
+  mu.all[11:20,3] = -1.5
+  mu.all[11:20,4] = -1.5
+
+  Sigma = diag(4,p)
+
+  for(j in 1:100){
+
+  y = rbind(rmvnorm(n,mu.all[,1],Sigma),
+            rmvnorm(n,mu.all[,2],Sigma),
+            rmvnorm(n,mu.all[,3],Sigma),
+            rmvnorm(n,mu.all[,4],Sigma))
+
+  parse.fit = parse(K=4, lambda=2:4, y=y,cores = 6)
+
+  info.parse = which(sapply(lapply(apply(parse.fit$mu.hat.best,2,unique),length),function(x){x})==4)
+
+  z.parse = parse.fit$s.hat.best
+
+  result[j,1] = sum(info.parse<=20)/20
+
+  result[j,2] = sum(info.parse>20)/180
+
+  result[j,3] = miss.clus(z.parse,true.label)
+
+}
+
+
+  xtable(t(apply(result[1:7,],2,mean))*100,digit = 3)
+
+  xtable(t(apply(result[1:7,],2,sd))*100,digit = 2)
+
+
+
+
+
+
+
+
+
+
