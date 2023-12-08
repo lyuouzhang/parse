@@ -64,7 +64,7 @@ parse <- function(tuning=NULL, K=NULL, lambda = NULL, y, N = 100, kms.iter = 100
 
   ## ----- check invalid numbers
   y = as.matrix(y)
-  if(!missing(tuning)){
+  if(missing(tuning)){
     if(missing(K)||missing(lambda)){
       stop("Require a matrix of tuning parameters for 'tuning' or vectors for 'K' and 'lambda' ")
     }else{
