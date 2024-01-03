@@ -57,7 +57,9 @@
 #' @export
 
 utils::globalVariables("j")
-parse <- function(tuning=NULL, K=NULL, lambda = NULL, y, N = 100, kms.iter = 100, kms.nstart = 100, eps.diff = 1e-5, eps.em = 1e-5, model.crit = 'gic', backward = TRUE, cores = 2, min.iter = 10){
+parse <- function(tuning=NULL, K=NULL, lambda = NULL, y, N = 100, kms.iter = 100, kms.nstart = 100,
+                  eps.diff = 1e-5, eps.em = 1e-5, model.crit = 'gic', backward = TRUE, cores = 2, min.iter = 10,
+                  pdf_log = function(x,mu,sigma){mvtnorm::dmvnorm(x,mu,sigma,log=TRUE)}){
   ## tuning: a matrix with 2 columns;
   ##  1st column = K (number of clusters), positive integer;
   ##  2nd column = lambda, nonnegative real number.
@@ -210,11 +212,15 @@ parse <- function(tuning=NULL, K=NULL, lambda = NULL, y, N = 100, kms.iter = 100
           break
         }
 
+        pdf_log_index = function(index, mu, sigma, y){
+          pdf_log(y, mu[index,], sigma)
+        }
+
         if(length(parse.positive)<n-2){
-          temp.normal <- sapply(c(1:K1), dmvnorm_log, y=y[,parse.positive], mu=mu[t,,parse.positive],
+          temp.normal <- sapply(c(1:K1), pdf_log_index, y=y[,parse.positive], mu=mu[t,,parse.positive],
                                 sigma = sigma.iter[t,parse.positive,parse.positive])
         }else{
-          temp.normal <- sapply(c(1:K1), dmvnorm_log, y=y[,parse.positive], mu=mu[t,,parse.positive],
+          temp.normal <- sapply(c(1:K1), pdf_log_index, y=y[,parse.positive], mu=mu[t,,parse.positive],
                                 sigma = diag(diag(sigma.iter[t,parse.positive,parse.positive])))
         }
 
