@@ -58,7 +58,7 @@
 
 utils::globalVariables("j")
 parse <- function(tuning=NULL, K=NULL, lambda = NULL, y, N = 100, kms.iter = 100, kms.nstart = 100,
-                  eps.diff = 1e-5, eps.em = 1e-5, model.crit = 'gic', backward = TRUE, cores = 2, min.iter = 10,
+                  eps.diff = 1e-5, eps.em = 1e-5, model.crit = 'gic', backward = TRUE, cores = 2, min.iter = 1,
                   pdf_log = function(x,mu,sigma){mvtnorm::dmvnorm(x,mu,sigma,log=TRUE)}){
   ## tuning: a matrix with 2 columns;
   ##  1st column = K (number of clusters), positive integer;
@@ -112,6 +112,7 @@ parse <- function(tuning=NULL, K=NULL, lambda = NULL, y, N = 100, kms.iter = 100
   mu.hat = list()						# cluster means
   sigma.hat = list()				# cluster variance
   p.hat = list() 				    # cluster proportion
+  feature.hat = list()      # working features
 
   ## ------------ BIC and GIC ----
   llh=c()
@@ -144,12 +145,23 @@ parse <- function(tuning=NULL, K=NULL, lambda = NULL, y, N = 100, kms.iter = 100
       gic[j.tune]         <- temp.out$gic.best
       bic[j.tune]         <- temp.out$bic.best
     }else{
-      sigma.iter <-  array(0, dim = c(N,d,d))	## first index is for iteration, the other two for covariance (d by d)
+      #sigma.iter <-  array(0, dim = c(N,d,d))	## first index is for iteration, the other two for covariance (d by d)
+      sigma.iter = list()
+      for(i in 3:4){
+        #sigma.iter[[i]] = bigmemory::big.matrix(d,d)
+        sigma.iter[[i]] = 1:d
+      }
       p <- matrix(0, ncol = K1, nrow = N)		## each row is clusters proportions
       mu <- array(0, dim = c(N, K1, d))		## N=iteration, K1=each cluster , d=dimension
 
       ### --- start from kmeans with multiple starting values	-----
-      kms1 = kmeans(y, centers = K1, nstart = kms.nstart, iter.max = kms.iter)
+      if(d<=2000){
+        kms1 = kmeans(y, centers = K1, nstart = kms.nstart, iter.max = kms.iter)
+      }else{
+        y0 = y[,order(apply(y,2,var),decreasing = TRUE)[1:2000]]
+        kms1 = kmeans(y0, centers = K1, nstart = kms.nstart, iter.max = kms.iter)
+      }
+      #kms1 = kernlab::specc(y, centers = K1)
       kms1.class = kms1$cluster
 
       mean0.fn <- function(k){
@@ -163,10 +175,12 @@ parse <- function(tuning=NULL, K=NULL, lambda = NULL, y, N = 100, kms.iter = 100
         return(out)
       }
 
-      #sigmahat for tensor
+      #sigmahat with sample covariance matrix
       sigma.est.fn <- function(y, mu, alpha ,n, d, K){
         sigma = matrix(0,d,d)
         for(k in seq(K)){
+          # v.tmp = t( t(y) - mu[k,] )
+          # sigma <- sigma + diag(alpha[,k]) * tcrossprod(v.tmp)/n
           for(i in seq(n)){
             v.tmp <- y[i,] -mu[k,]
             sigma <- sigma + alpha[i,k] * tcrossprod(v.tmp)/n
@@ -175,9 +189,26 @@ parse <- function(tuning=NULL, K=NULL, lambda = NULL, y, N = 100, kms.iter = 100
         return(sigma)
       }
 
+      #sigmahat with for only diagonal
+      sigma.est.fn.single <- function(y, mu, alpha ,n, d, K){
+        sigma = rep(0,d)
+        for(k in seq(K)){
+          # v.tmp = t( t(y) - mu[k,] )
+          # sigma = sigma + alpha[,k] * apply(v.tmp^2,1,sum)/n
+          for(i in seq(n)){
+            for(j in seq(d)){
+              v.tmp <- y[i,j] -mu[k,j]
+              sigma[j] <- sigma[j] + alpha[i,k] * v.tmp^2/n
+            }
+          }
+        }
+        return(sigma)
+      }
+
       mu[1,,] <- t(sapply(1:K1, mean0.fn))
       p[1, ] <- as.numeric(table(kms1.class))/n
-      sigma.iter[1,,] <- sigma.est.fn(y,mu[1,,],matrix(p[1, ],n,K1,byrow = TRUE),n, d, K1)
+      #sigma.iter[1,,] <- sigma.est.fn(y,mu[1,,],matrix(p[1, ],n,K1,byrow = TRUE),n, d, K1)
+      sigma.iter[[1]] = sigma.iter[[2]] = apply(y,2,var)
 
       ## array of posterior probability computed in E-step
       alpha.temp <- array(0, dim=c(N,n,K1))
@@ -189,6 +220,31 @@ parse <- function(tuning=NULL, K=NULL, lambda = NULL, y, N = 100, kms.iter = 100
           A = rbind(A, cbind(matrix(0,K-k,k-1),rep(1,K-k),-diag(K-k)))
         }
         return(A)
+      }
+
+      pdf_log_index = function(index, mu, sigma, y){
+        pdf_log(y, mu[index,], sigma)
+      }
+
+      pdf_log_index_single = function(coord, index, mu, sigma, y){
+        pdf_log(as.matrix(y[,coord]), as.matrix(mu[index,coord]), as.matrix(sigma[coord]))
+      }
+
+      pdf_log_index_multiple = function(index, mu, sigma, y, info_length){
+        apply(sapply(c(1:info_length), pdf_log_index_single,index=index, y=y, mu=mu, sigma=sigma),1,sum)
+      }
+
+      alpha.fn <- function(k, log.dens = temp.normal, p.temp = p[t,]){
+        # because p[t,k](estimated proportion is 0, i.e. empty cluster), thus log(p[t,k]) is Inf(Inf - Inf =NaN instead of 0) which turns to error
+
+        if(p.temp[k] ==0){out.alpha = rep(0,dim(log.dens)[1])}
+        else {
+          log.mix1 = sweep(log.dens,2, log(p.temp), '+')
+          log.ratio1 = sweep(log.mix1, 1, log.mix1[,k], '-')
+          out.alpha = 1/rowSums(exp(log.ratio1))
+          out.alpha[which(rowSums(exp(log.ratio1)) == 0)] = 0
+        }
+        return(out.alpha)
       }
 
       mu_diff = mu.diff.create(K1)
@@ -204,37 +260,34 @@ parse <- function(tuning=NULL, K=NULL, lambda = NULL, y, N = 100, kms.iter = 100
           parse.positive = 1:d
         }
 
-        if(length(parse.positive)<=1){
+        parse.positive = intersect(parse.positive,sigma.iter[[3]])
+        parse.position = which(sigma.iter[[3]] %in% parse.positive)
+
+        if(length(parse.positive)<=2){
           s.hat[[j.tune]] = apply(alpha.temp[t,,],1,which.max)		# clustering labels
           mu.hat[[j.tune]] = mu[t,,]							# cluster means
-          sigma.hat[[j.tune]] = sigma.iter[t,,]					# cluster variance
+          sigma.hat[[j.tune]] = sigma.iter[[2]]				# cluster variance
           p.hat[[j.tune]] = p[t,]
           break
         }
 
-        pdf_log_index = function(index, mu, sigma, y){
-          pdf_log(y, mu[index,], sigma)
-        }
 
         if(length(parse.positive)<n-2){
-          temp.normal <- sapply(c(1:K1), pdf_log_index, y=y[,parse.positive], mu=mu[t,,parse.positive],
-                                sigma = sigma.iter[t,parse.positive,parse.positive])
-        }else{
-          temp.normal <- sapply(c(1:K1), pdf_log_index, y=y[,parse.positive], mu=mu[t,,parse.positive],
-                                sigma = diag(diag(sigma.iter[t,parse.positive,parse.positive])))
-        }
-
-        alpha.fn <- function(k, log.dens = temp.normal, p.temp = p[t,]){
-          # because p[t,k](estimated proportion is 0, i.e. empty cluster), thus log(p[t,k]) is Inf(Inf - Inf =NaN instead of 0) which turns to error
-
-          if(p.temp[k] ==0){out.alpha = rep(0,dim(log.dens)[1])}
-          else {
-            log.mix1 = sweep(log.dens,2, log(p.temp), '+')
-            log.ratio1 = sweep(log.mix1, 1, log.mix1[,k], '-')
-            out.alpha = 1/rowSums(exp(log.ratio1))
-            out.alpha[which(rowSums(exp(log.ratio1)) == 0)] = 0
+          if(!is.matrix(sigma.iter[[1]])){
+            sigma.tmp = diag(sigma.iter[[1]][parse.position])
+          }else{
+            sigma.tmp = sigma.iter[[1]][parse.position,parse.position]
           }
-          return(out.alpha)
+          temp.normal <- sapply(c(1:K1), pdf_log_index, y=y[,parse.positive], mu=mu[t,,parse.positive],
+                                sigma = sigma.tmp)
+        }else{
+          if(is.matrix(sigma.iter[[1]])){
+            sigma.tmp = diag(sigma.iter[[1]][parse.position,parse.position])
+          }else{
+            sigma.tmp = sigma.iter[[1]][parse.position]
+          }
+          temp.normal <- sapply(c(1:K1), pdf_log_index_multiple, y=y[,parse.positive], mu=mu[t,,parse.positive],
+                                sigma = sigma.tmp, info_length=length(parse.positive))
         }
 
         # E-step: update posterior probabilities pi0
@@ -245,23 +298,35 @@ parse <- function(tuning=NULL, K=NULL, lambda = NULL, y, N = 100, kms.iter = 100
         p[(t+1), ] <- colMeans(alpha.temp[(t+1),,])
 
         # M-step  part 2: update cluster sigma_j, c() read matrix by columns
-        sigma.iter[(t+1),,] <- sigma.est.fn(y,mu[t,,],alpha.temp[(t+1),,],n, d, K1)
+        if(length(parse.positive)<n-2){
+          sigma.iter[[2]] <- sigma.est.fn(y[,parse.positive],mu[t,,parse.positive],alpha.temp[(t+1),,],n, length(parse.positive), K1)
+          sigma.iter[[4]] = parse.positive
+        }else{
+          sigma.iter[[2]] <- sigma.est.fn.single(y[,parse.positive],mu[t,,parse.positive],alpha.temp[(t+1),,],n, length(parse.positive), K1)
+          sigma.iter[[4]] = parse.positive
+        }
 
-        mu[(t+1),,] <- foreach(j=1:d, .combine=cbind) %dopar% {parse_backward(j=j, y=y, mu.all = mu[t,,], alpha=alpha.temp[(t+1),,], sigma.all = diag(sigma.iter[(t+1),,]), eps.diff = eps.diff, K=K1, lambda = lambda1, optim.method ='BFGS')}
+        #mu[(t+1),,] <- foreach(j=1:d, .combine=cbind) %dopar% {parse_backward(j=j, y=y, mu.all = mu[t,,], alpha=alpha.temp[(t+1),,], sigma.all = diag(sigma.iter[[2]]), eps.diff = eps.diff, K=K1, lambda = lambda1, optim.method ='BFGS')}
+        mu[(t+1),,] <- foreach(j=1:d, .combine=cbind) %dopar% {parse_backward_single(y=y[,j], mu.all = mu[t,,j], alpha=alpha.temp[(t+1),,], eps.diff = eps.diff, K=K1, lambda = lambda1, optim.method ='BFGS')}
 
-        if(sum(abs(mu[(t+1),,]-mu[t,,]))/(sum(abs(mu[t,,]))+1)+ sum(abs(diag(sigma.iter[(t+1),,])-diag(sigma.iter[t,,])))/sum(abs(diag(sigma.iter[t,,]))) + sum(abs(p[(t+1),] - p[t,]))/sum(p[t,]) < eps.em) {
+        if(sum(abs(mu[(t+1),,]-mu[t,,]))/(sum(abs(mu[t,,]))+1) + sum(abs(p[(t+1),] - p[t,]))/sum(p[t,]) < eps.em) {
           s.hat[[j.tune]] = apply(alpha.temp[(t+1),,], 1, which.max)
           mu.hat[[j.tune]] = mu[(t+1),,]				# cluster means
-          sigma.hat[[j.tune]] = sigma.iter[(t+1),,]		# cluster variance
+          sigma.hat[[j.tune]] = sigma.iter[[2]]		# cluster variance
           p.hat[[j.tune]] = p[(t+1),]
+          feature.hat[[j.tune]] = sigma.iter[[4]]
           break
+        }else{
+          sigma.iter[[1]] = sigma.iter[[2]]
+          sigma.iter[[3]] = sigma.iter[[4]]
         }
 
         if(t==N-1) {
           s.hat[[j.tune]] = apply(alpha.temp[(t+1),,],1,which.max)		# clustering labels
           mu.hat[[j.tune]] = mu[(t+1),,]							# cluster means
-          sigma.hat[[j.tune]] = sigma.iter[(t+1),,]					# cluster variance
+          sigma.hat[[j.tune]] = sigma.iter[[2]]				# cluster variance
           p.hat[[j.tune]] = p[(t+1),]
+          feature.hat[[j.tune]] = sigma.iter[[4]]
           warning(paste('not converge when lambda = ', lambda1, ' and K = ', K1, sep=''))
         }
       }
@@ -269,22 +334,45 @@ parse <- function(tuning=NULL, K=NULL, lambda = NULL, y, N = 100, kms.iter = 100
       ## ------------ BIC and GIC ----
       label.s = sort(unique(s.hat[[j.tune]]))
 
-      ## with empty clusters
-      if(length(label.s) < K1){
-        llh[j.tune] = sum(table(s.hat[[j.tune]])*log(p.hat[[j.tune]][label.s]))
-        for(k in label.s){
-          llh[j.tune] = llh[j.tune] + sum(dmvnorm(y[s.hat[[j.tune]]==k,], mean=mu.hat[[j.tune]][k,], sigma = diag(diag(sigma.hat[[j.tune]])), log=TRUE))
+      if(length(feature.hat[[j.tune]])<n-2){
+        ## with empty clusters
+        if(length(label.s) < K1){
+          llh[j.tune] = sum(table(s.hat[[j.tune]])*log(p.hat[[j.tune]][label.s]))
+          for(k in label.s){
+            llh[j.tune] = llh[j.tune] + sum(pdf_log_index(k,y[s.hat[[j.tune]]==k,feature.hat[[j.tune]]], mu=mu.hat[[j.tune]][,feature.hat[[j.tune]]], sigma = sigma.hat[[j.tune]]))
+            #sum(dmvnorm(y[s.hat[[j.tune]]==k,], mean=mu.hat[[j.tune]][k,], sigma = diag(diag(sigma.hat[[j.tune]])), log=TRUE))
+          }
+        }else {
+          ## no empty clusters
+          llh[j.tune] = sum(table(s.hat[[j.tune]])*log(p.hat[[j.tune]]))
+          for(k in 1:K1){
+            llh[j.tune] = llh[j.tune] + sum(pdf_log_index(k,y[s.hat[[j.tune]]==k,feature.hat[[j.tune]]], mu=mu.hat[[j.tune]][,feature.hat[[j.tune]]], sigma = sigma.hat[[j.tune]]))
+            #sum(dmvnorm(y[s.hat[[j.tune]]==k,], mean=mu.hat[[j.tune]][k,], sigma = diag(diag(sigma.hat[[j.tune]])), log=TRUE))
+          }
         }
-      }else {
-      ## no empty clusters
-        llh[j.tune] = sum(table(s.hat[[j.tune]])*log(p.hat[[j.tune]]))
-        for(k in 1:K1){
-          llh[j.tune] = llh[j.tune] + sum(dmvnorm(y[s.hat[[j.tune]]==k,], mean=mu.hat[[j.tune]][k,], sigma = diag(diag(sigma.hat[[j.tune]])), log=TRUE))
+        ct.mu[j.tune] = sum(apply(mu.hat[[j.tune]], 2, count.mu, eps.diff=eps.diff))
+        gic[j.tune] = -2*llh[j.tune] + log(log(n))*log(d)*(length(label.s)-1+d+ct.mu[j.tune])
+        bic[j.tune] = -2*llh[j.tune] + log(n)*(length(label.s)-1+d+ct.mu[j.tune])
+      }else{
+        ## with empty clusters
+        if(length(label.s) < K1){
+          llh[j.tune] = sum(table(s.hat[[j.tune]])*log(p.hat[[j.tune]][label.s]))
+          for(k in label.s){
+            llh[j.tune] = llh[j.tune] + sum(pdf_log_index(k,y[s.hat[[j.tune]]==k,feature.hat[[j.tune]]], mu=mu.hat[[j.tune]][,feature.hat[[j.tune]]], sigma = sigma.hat[[j.tune]][feature.hat[[j.tune]]],info_length=length(feature.hat[[j.tune]])))
+            #sum(dmvnorm(y[s.hat[[j.tune]]==k,], mean=mu.hat[[j.tune]][k,], sigma = diag(diag(sigma.hat[[j.tune]])), log=TRUE))
+          }
+        }else {
+          ## no empty clusters
+          llh[j.tune] = sum(table(s.hat[[j.tune]])*log(p.hat[[j.tune]]))
+          for(k in 1:K1){
+            llh[j.tune] = llh[j.tune] + sum(pdf_log_index_multiple(k,y[s.hat[[j.tune]]==k,feature.hat[[j.tune]]], mu=mu.hat[[j.tune]][,feature.hat[[j.tune]]], sigma = sigma.hat[[j.tune]],info_length=length(feature.hat[[j.tune]])))
+            #sum(dmvnorm(y[s.hat[[j.tune]]==k,], mean=mu.hat[[j.tune]][k,], sigma = diag(diag(sigma.hat[[j.tune]])), log=TRUE))
+          }
         }
+        ct.mu[j.tune] = sum(apply(mu.hat[[j.tune]], 2, count.mu, eps.diff=eps.diff))
+        gic[j.tune] = -2*llh[j.tune] + log(log(n))*log(d)*(length(label.s)-1+d+ct.mu[j.tune])
+        bic[j.tune] = -2*llh[j.tune] + log(n)*(length(label.s)-1+d+ct.mu[j.tune])
       }
-      ct.mu[j.tune] = sum(apply(mu.hat[[j.tune]], 2, count.mu, eps.diff=eps.diff))
-      gic[j.tune] = -2*llh[j.tune] + log(log(n))*log(d)*(length(label.s)-1+d+ct.mu[j.tune])
-      bic[j.tune] = -2*llh[j.tune] + log(n)*(length(label.s)-1+d+ct.mu[j.tune])
     }
     #ends of one K, lambda
   }
@@ -304,11 +392,12 @@ parse <- function(tuning=NULL, K=NULL, lambda = NULL, y, N = 100, kms.iter = 100
   s.hat.best = s.hat[[index.best]]
   mu.hat.best = mu.hat[[index.best]]
   sigma.hat.best = sigma.hat[[index.best]]
+  feature.hat.best = feature.hat[[index.best]]
 
   K.best = tuning[index.best,1]
   lambda.best = tuning[index.best,2]
 
-  output = structure(list(K.best = K.best, mu.hat.best=mu.hat.best, sigma.hat.best=sigma.hat.best, p.hat.best=p.hat.best, s.hat.best=s.hat.best, lambda.best=lambda.best, gic.best = gic.best, bic.best=bic.best, llh.best = llh.best, ct.mu.best = ct.mu.best), class = 'parse_fit')
+  output = structure(list(K.best = K.best, mu.hat.best=mu.hat.best, sigma.hat.best=sigma.hat.best, p.hat.best=p.hat.best, s.hat.best=s.hat.best, lambda.best=lambda.best, feature.hat.best=feature.hat.best, gic.best = gic.best, bic.best=bic.best, llh.best = llh.best, ct.mu.best = ct.mu.best), class = 'parse_fit')
   stopCluster(cl)
   return(output)
 }
