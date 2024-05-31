@@ -179,12 +179,12 @@ parse <- function(tuning=NULL, K=NULL, lambda = NULL, y, N = 100, kms.iter = 100
       sigma.est.fn <- function(y, mu, alpha ,n, d, K){
         sigma = matrix(0,d,d)
         for(k in seq(K)){
-          # v.tmp = t( t(y) - mu[k,] )
-          # sigma <- sigma + diag(alpha[,k]) * tcrossprod(v.tmp)/n
-          for(i in seq(n)){
-            v.tmp <- y[i,] -mu[k,]
-            sigma <- sigma + alpha[i,k] * tcrossprod(v.tmp)/n
-          }
+          v.tmp = t( t(y) - mu[k,] )
+          sigma <- sigma + t(v.tmp*alpha[,k])%*%v.tmp/n
+          # for(i in seq(n)){
+          #   v.tmp <- y[i,] -mu[k,]
+          #   sigma <- sigma + alpha[i,k] * tcrossprod(v.tmp)/n
+          # }
         }
         return(sigma)
       }
@@ -193,14 +193,14 @@ parse <- function(tuning=NULL, K=NULL, lambda = NULL, y, N = 100, kms.iter = 100
       sigma.est.fn.single <- function(y, mu, alpha ,n, d, K){
         sigma = rep(0,d)
         for(k in seq(K)){
-          # v.tmp = t( t(y) - mu[k,] )
-          # sigma = sigma + alpha[,k] * apply(v.tmp^2,1,sum)/n
-          for(i in seq(n)){
-            for(j in seq(d)){
-              v.tmp <- y[i,j] -mu[k,j]
-              sigma[j] <- sigma[j] + alpha[i,k] * v.tmp^2/n
-            }
-          }
+          v.tmp = t( t(y) - mu[k,] )
+          sigma = sigma + apply(t(v.tmp^2)*alpha[,k],1,sum)/n
+          # for(i in seq(n)){
+          #   for(j in seq(d)){
+          #     v.tmp <- y[i,j] -mu[k,j]
+          #     sigma[j] <- sigma[j] + alpha[i,k] * v.tmp^2/n
+          #   }
+          # }
         }
         return(sigma)
       }
