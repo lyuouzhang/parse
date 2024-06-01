@@ -23,10 +23,11 @@ obj_parse_fn_alt <- function(mu.j, loc, y.j, alpha, K, lambda, eps.diff = 1e-5){
   if(length(mu.j) == 1){        ## penalty = 0
     mu.j1 <- rep(mu.j, K)       ## re-create mu with length K
     out <- sum(((rep(y.j, times=K) - rep(mu.j1, each=n))^2)*c(alpha))/2
+  }else{
+    mu.j1 <- mu.j[loc]	    ## same as mu.j%*%loc
+    dist.mtx <- dist(mu.j1)
+    out <- sum(((rep(y.j, times=K) - rep(mu.j1, each=n))^2)*c(alpha))/2 + lambda*sum((dist.mtx[dist.mtx > eps.diff])^(-1))    ## truncated differences
   }
-  mu.j1 <- mu.j[loc]	    ## same as mu.j%*%loc
-  dist.mtx <- dist(mu.j1)
-  out <- sum(((rep(y.j, times=K) - rep(mu.j1, each=n))^2)*c(alpha))/2 + lambda*sum((dist.mtx[dist.mtx > eps.diff])^(-1))    ## truncated differences
   return(out)
 }
 
