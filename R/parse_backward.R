@@ -114,3 +114,53 @@ parse_backward_single <- function(y, mu.all, alpha, K, lambda, eps.diff = 1e-5, 
   return(mu.iter[which.min(obj.value),])
 }
 
+
+### difference between means
+mu.diff.create = function(K){
+  A = c()
+  for(k in 1:K){
+    A = rbind(A, cbind(matrix(0,K-k,k-1),rep(1,K-k),-diag(K-k)))
+  }
+  return(A)
+}
+
+
+## ----- stepwise algorithm embeded with optim function with BFGS, for single dimension
+parse_backward_single_neighbor <- function(y, mu.all, alpha, K, lambda, eps.diff = 1e-5, optim.method = 'BFGS'){
+
+  loc1 <- matrix(0,ncol = K, nrow = K)
+  obj.value <- c()
+  mu.iter <- matrix(0, ncol = K, nrow = K)
+  loc1[1,] <- c(1:K)			#starting label
+
+  # input function: obj_parse_fn_alt()
+  mu.init1 <- mu.all
+  out0 <- optim(mu.init1[1:K], obj_parse_fn_alt, method = optim.method, loc = loc1[1,], y.j = y, alpha = alpha, eps.diff = eps.diff, K = K, lambda = lambda)
+  mu.iter[1,]  <- out0$par
+  obj.value[1] <- out0$value
+
+  mu.tmp = mu.iter[1,]
+
+  for(q in 1:(K-1)){
+    loc.val <- unique(loc1[q,])
+    mu.diff = mu.diff.create(length(loc.val))%*%mu.tmp
+    combin1 <- combn(loc.val,2)
+    i = which.min(abs(mu.diff))
+    temp.loc <- loc1[q,]
+    temp0 <- which(temp.loc == combin1[2,i])
+    temp.loc[temp0] <- combin1[1,i]
+    temp.loc[which(temp.loc > which(unique(temp.loc) != c(1:(K-q)))[1])] <- temp.loc[which(temp.loc>which(unique(temp.loc)!=c(1:(K-q)))[1])]-1
+
+    out1 <- optim(mu.init1[1:(K-q)], obj_parse_fn_alt, method = optim.method, loc = temp.loc, y.j = y, alpha = alpha, eps.diff = eps.diff, K = K, lambda = lambda)
+
+    obj.value[q+1] <- out1$value
+    mu.iter[(q+1),] <- out1$par[temp.loc]
+    mu.tmp = out1$par
+    loc1[(q+1),] <- temp.loc
+
+    if(obj.value[(q+1)] > obj.value[q]){
+      break
+    }
+  }
+  return(mu.iter[which.min(obj.value),])
+}
