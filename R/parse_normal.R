@@ -238,7 +238,7 @@ parse <- function(tuning=NULL, K=NULL, lambda = NULL, y, N = 100, kms.iter = 100
         for(k in 2:K){
           ret[,k] <- gamma.tmp[k-1,]%*%(y.tmp-(mu.tmp[,1]+mu.tmp[,k])/2)
         }
-        exp.ret= exp(ret + t(matrix(log(pro.tmp),K,n)))
+        exp.ret= exp(ret - t(matrix(log(pro.tmp),K,n)))
         exp.ret[which(exp.ret==Inf)] = 1e6
         ret <- exp.ret/apply(exp.ret,1,sum)
         return(ret)
@@ -250,7 +250,7 @@ parse <- function(tuning=NULL, K=NULL, lambda = NULL, y, N = 100, kms.iter = 100
         for(k in 2:K){
           ret[,k] <- gamma.tmp[k-1,]%*%(y.tmp-(mu.tmp[,1]+mu.tmp[,k])/2)
         }
-        exp.ret= exp(ret + t(matrix(log(pro.tmp),K,n)))
+        exp.ret= exp(ret - t(matrix(log(pro.tmp),K,n)))
         exp.ret[which(exp.ret==Inf)] = 1e6
         ret <- exp.ret/apply(exp.ret,1,sum)
         return(ret)
