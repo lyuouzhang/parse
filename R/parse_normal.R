@@ -236,9 +236,9 @@ parse <- function(tuning=NULL, K=NULL, lambda = NULL, y, N = 100, kms.iter = 100
         ret <- matrix(0,n,K)
         gamma.tmp = t(solve(sigma.tmp,mu.tmp[,1]-mu.tmp[,-1]))
         for(k in 2:K){
-          ret[,k] <- gamma.tmp[k-1,]%*%(y.tmp-(mu.tmp[,1]+mu.tmp[,k])/2)
+          ret[,k] <- -gamma.tmp[k-1,]%*%(y.tmp-(mu.tmp[,1]+mu.tmp[,k])/2)
         }
-        exp.ret= exp(ret - t(matrix(log(pro.tmp),K,n)))
+        exp.ret= exp(ret + t(matrix(log(pro.tmp),K,n)))
         exp.ret[which(exp.ret==Inf)] = 1e6
         ret <- exp.ret/apply(exp.ret,1,sum)
         return(ret)
@@ -248,9 +248,9 @@ parse <- function(tuning=NULL, K=NULL, lambda = NULL, y, N = 100, kms.iter = 100
         ret <- matrix(0,n,K)
         gamma.tmp = t((mu.tmp[,1]-mu.tmp[,-1])/sigma.tmp)
         for(k in 2:K){
-          ret[,k] <- gamma.tmp[k-1,]%*%(y.tmp-(mu.tmp[,1]+mu.tmp[,k])/2)
+          ret[,k] <- -gamma.tmp[k-1,]%*%(y.tmp-(mu.tmp[,1]+mu.tmp[,k])/2)
         }
-        exp.ret= exp(ret - t(matrix(log(pro.tmp),K,n)))
+        exp.ret= exp(ret + t(matrix(log(pro.tmp),K,n)))
         exp.ret[which(exp.ret==Inf)] = 1e6
         ret <- exp.ret/apply(exp.ret,1,sum)
         return(ret)
@@ -271,7 +271,7 @@ parse <- function(tuning=NULL, K=NULL, lambda = NULL, y, N = 100, kms.iter = 100
         parse.position = which(sigma.iter[[3]] %in% parse.positive)
 
         if(length(parse.positive)<=2){
-          s.hat[[j.tune]] = apply(alpha.temp[t,,],1,which.max)		# clustering labels
+          s.hat[[j.tune]] = apply(alpha.temp[t,,],1,which.min)		# clustering labels
           mu.hat[[j.tune]] = mu[t,,]							# cluster means
           sigma.hat[[j.tune]] = sigma.iter[[2]]				# cluster variance
           p.hat[[j.tune]] = p[t,]
@@ -321,7 +321,7 @@ parse <- function(tuning=NULL, K=NULL, lambda = NULL, y, N = 100, kms.iter = 100
 
 
         if(sum(abs(mu[(t+1),,]-mu[t,,]))/(sum(abs(mu[t,,]))+1) + sum(abs(p[(t+1),] - p[t,]))/sum(p[t,]) < eps.em) {
-          s.hat[[j.tune]] = apply(alpha.temp[(t+1),,], 1, which.max)
+          s.hat[[j.tune]] = apply(alpha.temp[(t+1),,], 1, which.min)
           mu.hat[[j.tune]] = mu[(t+1),,]				# cluster means
           sigma.hat[[j.tune]] = sigma.iter[[2]]		# cluster variance
           p.hat[[j.tune]] = p[(t+1),]
@@ -333,7 +333,7 @@ parse <- function(tuning=NULL, K=NULL, lambda = NULL, y, N = 100, kms.iter = 100
         }
 
         if(t==N-1) {
-          s.hat[[j.tune]] = apply(alpha.temp[(t+1),,],1,which.max)		# clustering labels
+          s.hat[[j.tune]] = apply(alpha.temp[(t+1),,],1,which.min)		# clustering labels
           mu.hat[[j.tune]] = mu[(t+1),,]							# cluster means
           sigma.hat[[j.tune]] = sigma.iter[[2]]				# cluster variance
           p.hat[[j.tune]] = p[(t+1),]
