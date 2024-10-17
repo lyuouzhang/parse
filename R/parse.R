@@ -6,6 +6,7 @@
 #' @import foreach
 #' @importFrom parallel detectCores makeCluster stopCluster
 #' @import utils
+#' @import elasticnet
 #' @description The PAirwise Reciprocal fuSE (PARSE) penalty was proposed by Wang, Zhou and Hoeting (2016). Under the framework of the model-based clustering, PARSE aims to identify the pairwise informative variables for clustering, especially for high-dimensional data.
 #'
 #' @usage parse(tuning, K = NULL, lambda = NULL, y, N = 100, kms.iter = 100, kms.nstart = 100,
@@ -59,6 +60,7 @@
 utils::globalVariables("j")
 parse <- function(tuning=NULL, K=NULL, lambda = NULL, y, N = 100, kms.iter = 100, kms.nstart = 100,
                   eps.diff = 1e-5, eps.em = 1e-5, model.crit = 'gic', backward = TRUE, cores = 2, min.iter = 1,
+                  pca_adjust = 0.1,
                   pdf_log = function(x,mu,sigma){mvtnorm::dmvnorm(x,mu,sigma,log=TRUE)}){
   ## tuning: a matrix with 2 columns;
   ##  1st column = K (number of clusters), positive integer;
@@ -107,6 +109,16 @@ parse <- function(tuning=NULL, K=NULL, lambda = NULL, y, N = 100, kms.iter = 100
   n = nrow(y)
   d = ncol(y)
 
+  ## PCA adjustment
+  ## default 10% informative features
+  if(!is.null(pca_adjust)){
+    svd.result = svd(y)
+    parse.positive = sort(order(apply(abs(svd.result$v[,1:4]),1,sum),decreasing = TRUE)[1:floor(d*pca_adjust)])
+  }else{
+    parse.positive = 1:d
+  }
+
+
   ### outputs
   s.hat =list()	            # clustering labels
   mu.hat = list()						# cluster means
@@ -154,15 +166,15 @@ parse <- function(tuning=NULL, K=NULL, lambda = NULL, y, N = 100, kms.iter = 100
       p <- matrix(0, ncol = K1, nrow = N)		## each row is clusters proportions
       mu <- array(0, dim = c(N, K1, d))		## N=iteration, K1=each cluster , d=dimension
 
-      ### --- start from kmeans with multiple starting values	-----
-      if(d<=2000){
-        kms1 = kmeans(y, centers = K1, nstart = kms.nstart, iter.max = kms.iter)
-      }else{
-        y0 = y[,order(apply(y,2,var),decreasing = TRUE)[1:2000]]
-        kms1 = kmeans(y0, centers = K1, nstart = kms.nstart, iter.max = kms.iter)
-      }
-      #kms1 = kernlab::specc(y, centers = K1)
-      kms1.class = kms1$cluster
+      ### --- start from spectral clustering-----
+      #if(d<=2000){
+      #  kms1 = kmeans(y, centers = K1, nstart = kms.nstart, iter.max = kms.iter)
+      #}else{
+      #  y0 = y[,order(apply(y,2,var),decreasing = TRUE)[1:2000]]
+      #  kms1 = kmeans(y0, centers = K1, nstart = kms.nstart, iter.max = kms.iter)
+      #}
+      kms1 = kernlab::specc(y[,parse.positive], centers = K1)
+      kms1.class = as.numeric(kms1)
 
       mean0.fn <- function(k){
         if(length(y[kms1.class == k, 1]) == 1) {
@@ -256,8 +268,6 @@ parse <- function(tuning=NULL, K=NULL, lambda = NULL, y, N = 100, kms.iter = 100
         if(t>min.iter){
           parse.diff = mu_diff%*%mu[t,,]
           parse.positive = which(apply(abs(parse.diff),2,sum)>1e-4)
-        }else{
-          parse.positive = 1:d
         }
 
         parse.positive = intersect(parse.positive,sigma.iter[[3]])
@@ -307,7 +317,13 @@ parse <- function(tuning=NULL, K=NULL, lambda = NULL, y, N = 100, kms.iter = 100
         }
 
         #mu[(t+1),,] <- foreach(j=1:d, .combine=cbind) %dopar% {parse_backward(j=j, y=y, mu.all = mu[t,,], alpha=alpha.temp[(t+1),,], sigma.all = diag(sigma.iter[[2]]), eps.diff = eps.diff, K=K1, lambda = lambda1, optim.method ='BFGS')}
-        mu[(t+1),,] <- foreach(j=1:d, .combine=cbind) %dopar% {parse_backward_single(y=y[,j], mu.all = mu[t,,j], alpha=alpha.temp[(t+1),,], eps.diff = eps.diff, K=K1, lambda = lambda1, optim.method ='BFGS')}
+        #mu[(t+1),,] <- foreach(j=1:d, .combine=cbind) %dopar% {parse_backward_single(y=y[,j], mu.all = mu[t,,j], alpha=alpha.temp[(t+1),,], eps.diff = eps.diff, K=K1, lambda = lambda1, optim.method ='BFGS')}
+
+        # update informative features and 10% non-informative features
+        mu[(t+1),,] = mu[t,,]
+        parse.update = sort(c(parse.positive,sample(setdiff(1:d,parse.positive),floor((d-length(parse.positive))*0.1))))
+        mu[(t+1),,parse.update] <- foreach(j=parse.update, .combine=cbind) %dopar% {parse_backward_single_neighbor(y=y[,j], mu.all = mu[t,,j], alpha=alpha.temp[(t+1),,], eps.diff = eps.diff, K=K1, lambda = lambda1, optim.method ='BFGS')}
+
 
         if(sum(abs(mu[(t+1),,]-mu[t,,]))/(sum(abs(mu[t,,]))+1) + sum(abs(p[(t+1),] - p[t,]))/sum(p[t,]) < eps.em) {
           s.hat[[j.tune]] = apply(alpha.temp[(t+1),,], 1, which.max)
@@ -335,18 +351,23 @@ parse <- function(tuning=NULL, K=NULL, lambda = NULL, y, N = 100, kms.iter = 100
       label.s = sort(unique(s.hat[[j.tune]]))
 
       if(length(feature.hat[[j.tune]])<n-2){
+        if(!is.matrix(sigma.hat[[j.tune]])){
+          sigma.tmp = diag(sigma.hat[[j.tune]])
+        }else{
+          sigma.tmp = sigma.hat[[j.tune]]
+        }
         ## with empty clusters
         if(length(label.s) < K1){
           llh[j.tune] = sum(table(s.hat[[j.tune]])*log(p.hat[[j.tune]][label.s]))
           for(k in label.s){
-            llh[j.tune] = llh[j.tune] + sum(pdf_log_index(k,y[s.hat[[j.tune]]==k,feature.hat[[j.tune]]], mu=mu.hat[[j.tune]][,feature.hat[[j.tune]]], sigma = sigma.hat[[j.tune]]))
+            llh[j.tune] = llh[j.tune] + sum(pdf_log_index(k,y[s.hat[[j.tune]]==k,feature.hat[[j.tune]]], mu=mu.hat[[j.tune]][,feature.hat[[j.tune]]], sigma = sigma.tmp))
             #sum(dmvnorm(y[s.hat[[j.tune]]==k,], mean=mu.hat[[j.tune]][k,], sigma = diag(diag(sigma.hat[[j.tune]])), log=TRUE))
           }
         }else {
           ## no empty clusters
           llh[j.tune] = sum(table(s.hat[[j.tune]])*log(p.hat[[j.tune]]))
           for(k in 1:K1){
-            llh[j.tune] = llh[j.tune] + sum(pdf_log_index(k,y[s.hat[[j.tune]]==k,feature.hat[[j.tune]]], mu=mu.hat[[j.tune]][,feature.hat[[j.tune]]], sigma = sigma.hat[[j.tune]]))
+            llh[j.tune] = llh[j.tune] + sum(pdf_log_index(k,y[s.hat[[j.tune]]==k,feature.hat[[j.tune]]], mu=mu.hat[[j.tune]][,feature.hat[[j.tune]]], sigma = sigma.tmp))
             #sum(dmvnorm(y[s.hat[[j.tune]]==k,], mean=mu.hat[[j.tune]][k,], sigma = diag(diag(sigma.hat[[j.tune]])), log=TRUE))
           }
         }
@@ -354,18 +375,23 @@ parse <- function(tuning=NULL, K=NULL, lambda = NULL, y, N = 100, kms.iter = 100
         gic[j.tune] = -2*llh[j.tune] + log(log(n))*log(d)*(length(label.s)-1+d+ct.mu[j.tune])
         bic[j.tune] = -2*llh[j.tune] + log(n)*(length(label.s)-1+d+ct.mu[j.tune])
       }else{
+        if(is.matrix(sigma.hat[[j.tune]])){
+          sigma.tmp = diag(sigma.hat[[j.tune]])
+        }else{
+          sigma.tmp = sigma.hat[[j.tune]]
+        }
         ## with empty clusters
         if(length(label.s) < K1){
           llh[j.tune] = sum(table(s.hat[[j.tune]])*log(p.hat[[j.tune]][label.s]))
           for(k in label.s){
-            llh[j.tune] = llh[j.tune] + sum(pdf_log_index(k,y[s.hat[[j.tune]]==k,feature.hat[[j.tune]]], mu=mu.hat[[j.tune]][,feature.hat[[j.tune]]], sigma = sigma.hat[[j.tune]][feature.hat[[j.tune]]],info_length=length(feature.hat[[j.tune]])))
+            llh[j.tune] = llh[j.tune] + sum(pdf_log_index(k,y[s.hat[[j.tune]]==k,feature.hat[[j.tune]]], mu=mu.hat[[j.tune]][,feature.hat[[j.tune]]], sigma = sigma.tmp,info_length=length(feature.hat[[j.tune]])))
             #sum(dmvnorm(y[s.hat[[j.tune]]==k,], mean=mu.hat[[j.tune]][k,], sigma = diag(diag(sigma.hat[[j.tune]])), log=TRUE))
           }
         }else {
           ## no empty clusters
           llh[j.tune] = sum(table(s.hat[[j.tune]])*log(p.hat[[j.tune]]))
           for(k in 1:K1){
-            llh[j.tune] = llh[j.tune] + sum(pdf_log_index_multiple(k,y[s.hat[[j.tune]]==k,feature.hat[[j.tune]]], mu=mu.hat[[j.tune]][,feature.hat[[j.tune]]], sigma = sigma.hat[[j.tune]],info_length=length(feature.hat[[j.tune]])))
+            llh[j.tune] = llh[j.tune] + sum(pdf_log_index_multiple(k,y[s.hat[[j.tune]]==k,feature.hat[[j.tune]]], mu=mu.hat[[j.tune]][,feature.hat[[j.tune]]], sigma = sigma.tmp,info_length=length(feature.hat[[j.tune]])))
             #sum(dmvnorm(y[s.hat[[j.tune]]==k,], mean=mu.hat[[j.tune]][k,], sigma = diag(diag(sigma.hat[[j.tune]])), log=TRUE))
           }
         }
