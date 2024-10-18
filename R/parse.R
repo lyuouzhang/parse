@@ -177,12 +177,12 @@ parse <- function(tuning=NULL, K=NULL, lambda = NULL, y, N = 100, kms.iter = 100
       kms1.class = as.numeric(kms1)
 
       mean0.fn <- function(k){
-        if(length(y[kms1.class == k, 1]) == 1) {
+        if(length(y[kms1.class == k, parse.positive]) == 1) {
           ## if there is only one data in a cluster,
-          out <- y[kms1.class == k,]
+          out <- y[kms1.class == k,parse.positive]
         }
         else {
-          out <- colMeans(y[kms1.class == k,])
+          out <- colMeans(y[kms1.class == k,parse.positive])
         }
         return(out)
       }
@@ -217,7 +217,8 @@ parse <- function(tuning=NULL, K=NULL, lambda = NULL, y, N = 100, kms.iter = 100
         return(sigma)
       }
 
-      mu[1,,] <- t(sapply(1:K1, mean0.fn))
+      mu[1,,parse.positive] <- t(sapply(1:K1, mean0.fn))
+      mu[1,,-parse.positive] <- matrix(colMeans(y[,-parse.positive]),nrow=4,ncol=d-length(parse.positive),byrow = TRUE)
       p[1, ] <- as.numeric(table(kms1.class))/n
       #sigma.iter[1,,] <- sigma.est.fn(y,mu[1,,],matrix(p[1, ],n,K1,byrow = TRUE),n, d, K1)
       sigma.iter[[1]] = sigma.iter[[2]] = apply(y,2,var)
