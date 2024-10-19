@@ -9,9 +9,7 @@
 #' @description The PAirwise Reciprocal fuSE (PARSE) penalty was proposed by Wang, Zhou and Hoeting (2016). Under the framework of the model-based clustering, PARSE aims to identify the pairwise informative variables for clustering, especially for high-dimensional data.
 #'
 #' @usage parse(tuning, K = NULL, lambda = NULL, y, N = 100, kms.iter = 100, kms.nstart = 100,
-#'       eps.diff = 1e-5, eps.em = 1e-5, model.crit = 'gic', backward = TRUE, cores=2)
-#' parse(tuning = NULL, K, lambda, y, N = 100, kms.iter = 100, kms.nstart = 100,
-#'       eps.diff = 1e-5, eps.em = 1e-5, model.crit = 'gic', backward = TRUE, cores=2)
+#'       eps.diff = 1e-3, eps.em = 1e-3, model.crit = 'gic', backward = TRUE, cores=2)
 #'
 #' @param tuning A 2-dimensional vector or a matrix with 2 columns, the first column is the number of clusters \eqn{K} and the second column is the tuning parameter \eqn{\lambda} in the penalty term. If this is missing, then \code{K} and \code{lambda} must be provided.
 #' @param K The number of clusters \eqn{K}.
@@ -58,8 +56,8 @@
 
 utils::globalVariables("j")
 parse_normal <- function(tuning=NULL, K=NULL, lambda = NULL, y, N = 100, kms.iter = 100, kms.nstart = 10,
-                  eps.diff = 1e-5, eps.em = 1e-5, model.crit = 'gic', backward = TRUE, cores = 2, min.iter = 1,
-                  pca_adjust = 0.1){
+                  eps.diff = 1e-3, eps.em = 1e-3, model.crit = 'gic', backward = TRUE, cores = 2, min.iter = 1,
+                  pca_adjust = 0.01){
   ## tuning: a matrix with 2 columns;
   ##  1st column = K (number of clusters), positive integer;
   ##  2nd column = lambda, nonnegative real number.
@@ -110,10 +108,13 @@ parse_normal <- function(tuning=NULL, K=NULL, lambda = NULL, y, N = 100, kms.ite
   ## PCA adjustment
   ## default 10% informative features
   if(!is.null(pca_adjust)){
-    svd.result = svd(y)
-    parse.positive = sort(order(apply(abs(svd.result$v[,1:4]),1,sum),decreasing = TRUE)[1:floor(d*pca_adjust)])
+    #svd.result = svd(y,nu=max(K),nv=max(K))
+    y0 = as(y, "CsparseMatrix")
+    svd.result = sparsesvd::sparsesvd(y0)
+    parse.positive = sort(order(apply(abs(svd.result$v[,1:max(K)]),1,sum),decreasing = TRUE)[1:floor(d*pca_adjust)])
+    parse.positive0 = sort(order(apply(abs(svd.result$v[,1:max(K)]),1,sum),decreasing = TRUE)[1:min(200,floor(d*pca_adjust))])
   }else{
-    parse.positive = 1:d
+    parse.positive = parse.positive0 = 1:d
   }
 
 
@@ -171,7 +172,7 @@ parse_normal <- function(tuning=NULL, K=NULL, lambda = NULL, y, N = 100, kms.ite
       #  y0 = y[,order(apply(y,2,var),decreasing = TRUE)[1:2000]]
       #  kms1 = kmeans(y0, centers = K1, nstart = kms.nstart, iter.max = kms.iter)
       #}
-      kms1 = kernlab::specc(y[,parse.positive], centers = K1)
+      kms1 = kernlab::specc(y[,parse.positive0], centers = K1)
       kms1.class = as.numeric(kms1)
 
 
@@ -318,11 +319,11 @@ parse_normal <- function(tuning=NULL, K=NULL, lambda = NULL, y, N = 100, kms.ite
 
         # update informative features and 10% non-informative features
         mu[(t+1),,] = mu[t,,]
-        parse.update = sort(c(parse.positive,sample(setdiff(1:d,parse.positive),floor((d-length(parse.positive))*0.1))))
+        parse.update = sort(c(parse.positive,sample(setdiff(1:d,parse.positive),floor((d-length(parse.positive))*0.05))))
         mu[(t+1),,parse.update] <- foreach(j=parse.update, .combine=cbind) %dopar% {parse_backward_single_neighbor(y=y[,j], mu.all = mu[t,,j], alpha=alpha.temp[(t+1),,], eps.diff = eps.diff, K=K1, lambda = lambda1, optim.method ='BFGS')}
 
 
-        if(sum(abs(mu[(t+1),,]-mu[t,,]))/(sum(abs(mu[t,,]))+1) + sum(abs(p[(t+1),] - p[t,]))/sum(p[t,]) < eps.em) {
+        if(sum(abs(mu[(t+1),,parse.positive]-mu[t,,parse.positive]))/(sum(abs(mu[t,,]))+1) + sum(abs(p[(t+1),] - p[t,]))/sum(p[t,]) < eps.em) {
           s.hat[[j.tune]] = apply(alpha.temp[(t+1),,], 1, which.max)
           mu.hat[[j.tune]] = mu[(t+1),,]				# cluster means
           sigma.hat[[j.tune]] = sigma.iter[[2]]		# cluster variance
