@@ -57,7 +57,7 @@
 #' @export
 
 utils::globalVariables("j")
-parse <- function(tuning=NULL, K=NULL, lambda = NULL, y, N = 100, kms.iter = 100, kms.nstart = 10,
+parse_normal <- function(tuning=NULL, K=NULL, lambda = NULL, y, N = 100, kms.iter = 100, kms.nstart = 10,
                   eps.diff = 1e-5, eps.em = 1e-5, model.crit = 'gic', backward = TRUE, cores = 2, min.iter = 1,
                   pca_adjust = 0.1){
   ## tuning: a matrix with 2 columns;
@@ -174,6 +174,7 @@ parse <- function(tuning=NULL, K=NULL, lambda = NULL, y, N = 100, kms.iter = 100
       kms1 = kernlab::specc(y[,parse.positive], centers = K1)
       kms1.class = as.numeric(kms1)
 
+
       mean0.fn <- function(k){
         if(length(y[kms1.class == k, parse.positive]) == 1) {
           ## if there is only one data in a cluster,
@@ -272,7 +273,7 @@ parse <- function(tuning=NULL, K=NULL, lambda = NULL, y, N = 100, kms.iter = 100
         parse.position = which(sigma.iter[[3]] %in% parse.positive)
 
         if(length(parse.positive)<=2){
-          s.hat[[j.tune]] = apply(alpha.temp[t,,],1,which.min)		# clustering labels
+          s.hat[[j.tune]] = apply(alpha.temp[t,,],1,which.max)		# clustering labels
           mu.hat[[j.tune]] = mu[t,,]							# cluster means
           sigma.hat[[j.tune]] = sigma.iter[[2]]				# cluster variance
           p.hat[[j.tune]] = p[t,]
@@ -322,7 +323,7 @@ parse <- function(tuning=NULL, K=NULL, lambda = NULL, y, N = 100, kms.iter = 100
 
 
         if(sum(abs(mu[(t+1),,]-mu[t,,]))/(sum(abs(mu[t,,]))+1) + sum(abs(p[(t+1),] - p[t,]))/sum(p[t,]) < eps.em) {
-          s.hat[[j.tune]] = apply(alpha.temp[(t+1),,], 1, which.min)
+          s.hat[[j.tune]] = apply(alpha.temp[(t+1),,], 1, which.max)
           mu.hat[[j.tune]] = mu[(t+1),,]				# cluster means
           sigma.hat[[j.tune]] = sigma.iter[[2]]		# cluster variance
           p.hat[[j.tune]] = p[(t+1),]
@@ -334,7 +335,7 @@ parse <- function(tuning=NULL, K=NULL, lambda = NULL, y, N = 100, kms.iter = 100
         }
 
         if(t==N-1) {
-          s.hat[[j.tune]] = apply(alpha.temp[(t+1),,],1,which.min)		# clustering labels
+          s.hat[[j.tune]] = apply(alpha.temp[(t+1),,],1,which.max)		# clustering labels
           mu.hat[[j.tune]] = mu[(t+1),,]							# cluster means
           sigma.hat[[j.tune]] = sigma.iter[[2]]				# cluster variance
           p.hat[[j.tune]] = p[(t+1),]
