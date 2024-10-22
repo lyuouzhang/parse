@@ -6,6 +6,9 @@
 #' @import foreach
 #' @importFrom parallel detectCores makeCluster stopCluster
 #' @import utils
+#' @import kernlab
+#' @import sparsesvd
+#' @import mvtnorm
 #' @description The PAirwise Reciprocal fuSE (PARSE) penalty was proposed by Wang, Zhou and Hoeting (2016). Under the framework of the model-based clustering, PARSE aims to identify the pairwise informative variables for clustering, especially for high-dimensional data.
 #'
 #' @usage parse(tuning, K = NULL, lambda = NULL, y, N = 100, kms.iter = 100, kms.nstart = 100,
@@ -358,13 +361,13 @@ parse_normal <- function(tuning=NULL, K=NULL, lambda = NULL, y, N = 100, kms.ite
         if(length(label.s) < K1){
           llh[j.tune] = sum(table(s.hat[[j.tune]])*log(p.hat[[j.tune]][label.s]))
           for(k in label.s){
-            llh[j.tune] = llh[j.tune] + sum(dmvnorm(y[s.hat[[j.tune]]==k,], mean=mu.hat[[j.tune]][k,], sigma = sigma.tmp, log=TRUE))
+            llh[j.tune] = llh[j.tune] + sum(mvtnorm::dmvnorm(y[s.hat[[j.tune]]==k,feature.hat[[j.tune]]], mean=mu.hat[[j.tune]][k,feature.hat[[j.tune]]], sigma = sigma.tmp, log=TRUE))
           }
         }else {
           ## no empty clusters
           llh[j.tune] = sum(table(s.hat[[j.tune]])*log(p.hat[[j.tune]]))
           for(k in 1:K1){
-            llh[j.tune] = llh[j.tune] + sum(dmvnorm(y[s.hat[[j.tune]]==k,], mean=mu.hat[[j.tune]][k,], sigma = sigma.tmp, log=TRUE))
+            llh[j.tune] = llh[j.tune] + sum(mvtnorm::dmvnorm(y[s.hat[[j.tune]]==k,feature.hat[[j.tune]]], mean=mu.hat[[j.tune]][k,feature.hat[[j.tune]]], sigma = sigma.tmp, log=TRUE))
           }
         }
         ct.mu[j.tune] = sum(apply(mu.hat[[j.tune]], 2, count.mu, eps.diff=eps.diff))
@@ -380,13 +383,13 @@ parse_normal <- function(tuning=NULL, K=NULL, lambda = NULL, y, N = 100, kms.ite
         if(length(label.s) < K1){
           llh[j.tune] = sum(table(s.hat[[j.tune]])*log(p.hat[[j.tune]][label.s]))
           for(k in label.s){
-            llh[j.tune] = llh[j.tune] + sum(dnorm(y[s.hat[[j.tune]]==k,], mean=mu.hat[[j.tune]][k,], sd = sqrt(sigma.tmp), log=TRUE))
+            llh[j.tune] = llh[j.tune] + sum(dnorm(y[s.hat[[j.tune]]==k,feature.hat[[j.tune]]], mean=mu.hat[[j.tune]][k,feature.hat[[j.tune]]], sd = sqrt(sigma.tmp), log=TRUE))
           }
         }else {
           ## no empty clusters
           llh[j.tune] = sum(table(s.hat[[j.tune]])*log(p.hat[[j.tune]]))
           for(k in 1:K1){
-            llh[j.tune] = llh[j.tune] + sum(dnorm(y[s.hat[[j.tune]]==k,], mean=mu.hat[[j.tune]][k,], sd = sqrt(sigma.tmp), log=TRUE))
+            llh[j.tune] = llh[j.tune] + sum(dnorm(y[s.hat[[j.tune]]==k,feature.hat[[j.tune]]], mean=mu.hat[[j.tune]][k,feature.hat[[j.tune]]], sd = sqrt(sigma.tmp), log=TRUE))
           }
         }
         ct.mu[j.tune] = sum(apply(mu.hat[[j.tune]], 2, count.mu, eps.diff=eps.diff))
