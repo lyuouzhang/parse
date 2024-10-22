@@ -6,7 +6,9 @@
 #' @import foreach
 #' @importFrom parallel detectCores makeCluster stopCluster
 #' @import utils
-#' @import elasticnet
+#' @import kernlab
+#' @import sparsesvd
+#' @import mvtnorm
 #' @description The PAirwise Reciprocal fuSE (PARSE) penalty was proposed by Wang, Zhou and Hoeting (2016). Under the framework of the model-based clustering, PARSE aims to identify the pairwise informative variables for clustering, especially for high-dimensional data.
 #'
 #' @usage parse(tuning, K = NULL, lambda = NULL, y, N = 100, kms.iter = 100, kms.nstart = 100,
@@ -59,7 +61,7 @@
 
 utils::globalVariables("j")
 parse <- function(tuning=NULL, K=NULL, lambda = NULL, y, N = 100, kms.iter = 100, kms.nstart = 100,
-                  eps.diff = 1e-5, eps.em = 1e-5, model.crit = 'gic', backward = TRUE, cores = 2, min.iter = 1,
+                  eps.diff = 1e-3, eps.em = 1e-3, model.crit = 'gic', backward = TRUE, cores = 2, min.iter = 1,
                   pca_adjust = 0.1,
                   pdf_log = function(x,mu,sigma){mvtnorm::dmvnorm(x,mu,sigma,log=TRUE)}){
   ## tuning: a matrix with 2 columns;
@@ -112,10 +114,13 @@ parse <- function(tuning=NULL, K=NULL, lambda = NULL, y, N = 100, kms.iter = 100
   ## PCA adjustment
   ## default 10% informative features
   if(!is.null(pca_adjust)){
-    svd.result = svd(y)
-    parse.positive = sort(order(apply(abs(svd.result$v[,1:4]),1,sum),decreasing = TRUE)[1:floor(d*pca_adjust)])
+    #svd.result = svd(y,nu=max(K),nv=max(K))
+    y0 = as(y, "CsparseMatrix")
+    svd.result = sparsesvd::sparsesvd(y0)
+    parse.positive = sort(order(apply(abs(svd.result$v[,1:max(K)]),1,sum),decreasing = TRUE)[1:floor(d*pca_adjust)])
+    parse.positive0 = sort(order(apply(abs(svd.result$v[,1:max(K)]),1,sum),decreasing = TRUE)[1:min(200,floor(d*pca_adjust))])
   }else{
-    parse.positive = 1:d
+    parse.positive = parse.positive0 = 1:d
   }
 
 
@@ -173,7 +178,7 @@ parse <- function(tuning=NULL, K=NULL, lambda = NULL, y, N = 100, kms.iter = 100
       #  y0 = y[,order(apply(y,2,var),decreasing = TRUE)[1:2000]]
       #  kms1 = kmeans(y0, centers = K1, nstart = kms.nstart, iter.max = kms.iter)
       #}
-      kms1 = kernlab::specc(y[,parse.positive], centers = K1)
+      kms1 = kernlab::specc(y[,parse.positive0], centers = K1)
       kms1.class = as.numeric(kms1)
 
       mean0.fn <- function(k){
